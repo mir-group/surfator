@@ -7,6 +7,8 @@ import ase
 from ase.neighborlist import NeighborList, NewPrimitiveNeighborList
 import ase.geometry
 
+import surfator.grouping
+
 import logging
 logger = logging.getLogger(__name__)
 
@@ -20,9 +22,16 @@ def analysis_result(func):
         return func(self, *args, **kwargs)
     return wrapper
 
-SITE_RADIUS_ATTRIBUTE = 'site_radius'
-STRUCTURE_GROUPS_ATTRIBUTE = 'structure_groups'
 
+SITE_RADIUS_ATTRIBUTE = 'site_radius'
+STRUCTURE_GROUP_ATTRIBUTE = 'structure_group'
+
+AGREE_GROUP_NONE = -1
+
+class StructureGroupVotingError(Exception):
+    pass
+class StructureGroupCompatabilityError(Exception):
+    pass
 
 class StructureGroupAnalysis(object):
     """Assign atoms from a trajectory to sites in a reference structure using "Structure Group Analysis"
@@ -32,12 +41,9 @@ class StructureGroupAnalysis(object):
             that the election winner must receive. Defaults to 50.001%; values
             smaller than half should be used with caution.
     """
-
     def __init__(self,
                  min_winner_percentage = 0.50001):
-
         self.min_winner_percentage = min_winner_percentage
-
         self._has_run = False
 
 
@@ -45,18 +51,16 @@ class StructureGroupAnalysis(object):
             ref_sn,
             traj,
             cutoff,
-            agreement_group_function,
+            agreement_group_function = surfator.grouping.all_atoms_agree,
+            structure_group_compatability = None,
             skin = 0.1):
         """
-
         Args:
             - ref_sn (SiteNetwork): A `SiteNetwork` containing the sites to which
                 the mobile atoms will be assigned. Can contain multiple, possibly
                 exclusive, sets of sites called "structure groups." The site
-                attribute `STRUCTURE_GROUPS_ATTRIBUTE` indicates, for each site,
-                which structure groups that site is compatible with. The value
-                is an integer bitmap: the nth bit indicates whether that site is
-                compatible with structure group n.
+                attribute `STRUCTURE_GROUP_ATTRIBUTE` indicates, for each site,
+                which structure group it belongs to.
             - traj (ndarray, n_frames x n_atoms x 3):
             - cutoff (ndarray or float): Cutoff radii can be given in `ref_sn`
                 for the sites with site attribute SITE_RADIUS_ATTRIBUTE. If none
@@ -66,9 +70,23 @@ class StructureGroupAnalysis(object):
                 float cutoff, half of which is then used as the radius for all
                 mobile atoms, or as an array of radii for each mobile atom which
                 are not modified. In distance units.
-            - agreement_group_function (callable taking an Atoms):
+            - agreement_group_function (callable taking an Atoms): A function that,
+                given an `Atoms` object containing the current positions of the
+                mobile atoms, returns labels indicating their membership in
+                "agreement groups." All atoms in an agreement group at some frame
+                must agree, by a majority vote (see `min_winner_percentage`),
+                on a single structure group. Defaults to
+                `surfator.grouping.all_atoms_agree`, which places all mobile atoms
+                into a single agreement group.
+            - structure_group_compatability (matrix-like): a square, symmetric
+                matrix indicating the compatability between the structure groups.
+                Symmetry is assumed but not checked. The side length is `max(site_groups)`.
+                Can be sparse. Defaults to `None`, in which case all entries are
+                assumed to be `True`, that is, all structure groups are compatable.
             - skin (float): Skin to use for the underlying ASE `NeighborList`.
                 Defaults to 0.1.
+        Returns:
+            a SiteTrajectory
         """
         # -- Housekeeping --
         n_frames = traj.shape[0]
@@ -93,7 +111,15 @@ class StructureGroupAnalysis(object):
 
         radii = np.concatenate((ref_radii, cutoff))
 
-        structgrp_masks = getattr(ref_sn, STRUCTURE_GROUPS_ATTRIBUTE)
+        structgrps = getattr(ref_sn, STRUCTURE_GROUP_ATTRIBUTE)
+        assert np.min(structgrps) >= 0
+        n_structgrps = np.max(structgrps) + 1
+        assert structure_group_compatability.shape[0] == structure_group_compatability.shape[1] == n_structgrps
+        structgrp_incomap = ~structure_group_compatability
+        ref_atoms_compatable_with = np.zeros(shape = (n_structgrps, n_ref_atoms), dtype = np.bool)
+        for structgrp in range(n_structgrps):
+            compat_structgrps = np.where(structure_group_compatability[structgrp])[0]
+            ref_atoms_compatable_with[structgrp] = np.in1d(structgrps, compat_structgrps)
 
         # -- Build neighbor list --
         # Build an `Atoms` that has the reference sites as atoms, first, then
@@ -125,7 +151,8 @@ class StructureGroupAnalysis(object):
 
         # Buffers
         nearest_neighbors = np.empty(shape = n_mob_atoms, dtype = np.int)
-        can_clamp_to = np.empty(shape = n_ref_atoms + n_mob_atoms, dtype = np.bool)
+        can_assign_to = np.empty(shape = n_ref_atoms + n_mob_atoms, dtype = np.bool)
+        structgrps_seen = np.empty(shape = n_structgrps, dtype = np.bool)
 
         # -- Do structure group analysis --
         for frame_idex, frame in enumerate(tqdm(traj)):
@@ -143,83 +170,78 @@ class StructureGroupAnalysis(object):
             agreegrp_masks = [agreegrp_labels == lbl for lbl in agreegrp_order]
             assert not np.any(np.logical_and.reduce(agreegrp_masks, axis = 0)), "Two or more agreement groups intersected at frame %i" % frame_idex
 
-            # Start with all 0 bits -- seen no structure groups yet
-            structure_groups_seen = 0
+            # Seen no structure groups yet
+            structgrps_seen.fill(False)
 
             # - (2) - Update neighbor list
             nl.update(full_struct)
 
             # - (3) - In order, assign the agreegrps
             for agreegrp_i, agreegrp_mask in enumerate(agreegrp_masks):
-                # We can clamp to any site that doesn't say no to a group we've seen
-                # i.e. -- doesn't have a 0 anywhere we have a 1
-                # ~structgrp_masks is "what I can't deal with" and
-                # structure_groups_seen is "what there is," so if their AND
-                # is anything other than zero, that site is incompatible with
-                # the current structure
-                can_clamp_to[:n_ref_atoms] = ~(~structgrp_masks & structure_groups_seen)
-                can_clamp_to[n_ref_atoms:] = False # Can never clamp to mobile atom
-                assert np.sum(can_clamp_to) <= n_ref_atoms
+                can_assign_to[:n_ref_atoms] = np.logical_and.reduce(ref_atoms_compatable_with[structgrps_seen])
+                can_assign_to[n_ref_atoms:] = False # Can never assign to mobile atom
+                n_can_assign = np.sum(can_assign_to)
+                assert n_can_assign <= n_ref_atoms
+                if n_can_assign == 0:
+                    raise StructureGroupCompatabilityError("At agreegrp %i, there are no structure groups compatible with the existing assignments, which are: %s" % (agreegrp_i, np.where(structgrps_seen)[0]))
 
                 to_assign = np.where(agreegrp)[0]
 
                 for is_last_round in (False, True):
-                    # If the agreegrp is -1, we don't actually want to enforce agreement
-                    if agreegrp_tags[agree_i] == -1:
+                    # If the agreegrp is AGREE_GROUP_NONE, we don't actually want to enforce agreement
+                    if agreegrp_tags[agree_i] == AGREE_GROUP_NONE:
                         is_last_round = True
-
-                    #print("Agreegrp %i last_round %i" % (agree_i, is_last_round))
-                    #view(full_struct[can_clamp_to])
-                    #_ = input("Enter to cont")
 
                     for mob_i in to_assign:
                         neighbor_idex, neighbor_offset = nl.get_neighbors(n_ref_atoms + mob_i)
-                        neighbor_mic_positions = (positions[neighbor_idex] + np.dot(neighbor_offset, ref_structure.cell))
+                        neighbor_mic_positions = (full_struct.get_positions()[neighbor_idex] + np.dot(neighbor_offset, ref_structure.cell))
 
-                        neighbor_dists = np.linalg.norm(positions[n_ref_atoms + mob_i] - neighbor_mic_positions, axis = 1)
-                        # Don't care if close to another trajectory mobile atom
-                        neighbor_dists[~can_clamp_to[neighbor_idex]] = np.inf
+                        neighbor_dists = np.linalg.norm(full_struct.get_positions()[n_ref_atoms + mob_i] - neighbor_mic_positions, axis = 1)
+                        # Take can_assign_to into account
+                        neighbor_dists[~can_assign_to[neighbor_idex]] = np.inf
                         nearest_neighbor = np.argmin(neighbor_dists)
                         nn_dist = neighbor_dists[nearest_neighbor]
-                        assert nn_dist < np.inf, "What?"
-                        assert nn_dist < cutoff + 2 * skin, "What? Over cutoff"
+                        assert nn_dist < np.inf, "Had no site options for mobile atom %i in agreegrp %i" % (mob_i, agreegrp_i)
+                        assert nn_dist < cutoff + 2 * skin, "Neighborlist somehow returned neighbors over its cutoff + 2 * skin. This should not happen."
 
                         nearest_neighbors[mob_i] = neighbor_idex[nearest_neighbor]
-                        # For unwrapped positions
-                        #outtraj[f_idex, mob_i] = neighbor_mic_positions[nearest_neighbor]
-                        # For wrapped positions
-                        outtraj[f_idex, mob_i] = ref_structure.get_positions()[nearest_neighbors[mob_i]]
+                        site_assignments[frame_idex, mob_i] = nearest_neighbors[mob_i]
 
                     if is_last_round:
                         break
                     else:
-                        # Get majority ref group
-                        # ref groups defined by ref_structure tags
-                        # Find winning alt structure group
-                        assigned_to_alt = ref_structure.get_tags()[nearest_neighbors[agreegrp]]
-                        candidates, votes = np.unique(assigned_to_alt, return_counts = True)
+                        structgrp_assignments = structgrps[nearest_neighbors[agreegrp]]
+                        candidates, votes = np.unique(structgrp_assignments, return_counts = True)
                         winner_idex = np.argmax(votes)
                         winner = candidates[winner_idex]
 
-                        majority = votes[winner_idex] / len(assigned_to_alt)
+                        majority = votes[winner_idex] / len(structgrp_assignments)
                         if majority < min_majority:
                             min_majority = majority
                         average_majority +=
                         average_majority_n += 1
 
-                        if votes[winner_idex] < min_winner_percentage * len(assigned_to_alt):
-                            pass # TODO TODO
+                        if votes[winner_idex] < min_winner_percentage * len(structgrp_assignments):
+                            raise StructureGroupVotingError("Winning structure group got %i/%i = %i%% votes, which is below set threshold of %i%%" % (votes[winner_idex], len(structgrp_assignments), 100 * votes[winner_idex] / len(structgrp_assignments), 100 * min_winner_percentage))
 
-                        # Clamp only to it
-                        can_clamp_to[:n_ref_atoms][~(ref_structure.get_tags() == winner)] = False
-                        # Only need to process ones that disagreed with majority
-                        to_assign = to_assign[assigned_to_alt != winner]
-                        # Keep track
-                        agreegrps_to_alts[agreegrp_tags[agree_i]] = winner
-                        # Now we loop and reclamp
+                        # Assign only to structure groups compatable with the winner
+                        # We do &= because constraints imposed by previous agreegrps
+                        # take precidence.
+                        can_assign_to[:n_ref_atoms] &= ref_atoms_compatable_with[winner]
+                        # We should always have SOMETHING to assign to -- the
+                        # winner is necessarily compatible with the existing
+                        # assignments
+                        assert np.sum(can_assign_to) != 0
+                        # Though technically we only need to reprocess those that
+                        # were incompatible with the winner, the neighborlist
+                        # already exists and reassigning them all is easier
+                        # and doesn't change the number of allocations being done.
+                        # Keep track -- the winner is now "seen"
+                        structgrps_seen[winner] = True
+                        # Now we loop and reassign
 
-        assert not np.isnan(np.sum(site_assignments))
-
+        assert np.min(site_assignments) >= 0 # Make sure all atoms assigned at all times
+        out_st = SiteTrajectory(ref_sn, site_assignments)
+        out_st.set_real_traj(traj)
         self._has_run = True
-
         return out_st
