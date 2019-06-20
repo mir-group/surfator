@@ -25,7 +25,6 @@ def get_layer_heights_kmeans(traj, cell, n, surface_normal = np.array([0, 0, 1])
     pbcc.wrap_points(traj)
 
     heights = np.dot(surface_normal, traj.T)
-    assert heights.shape = (traj.shape[0] * traj.shape[1],)
 
     kmeans = KMeans(n_clusters = n).fit(heights.reshape(-1, 1))
     heights = kmeans.cluster_centers_.reshape(-1)

@@ -39,7 +39,7 @@ def agree_within_layers(layer_heights, surface_normal = np.array([0, 0, 1])):
         atoms.wrap()
         surf_zs = np.dot(surface_normal, atoms.get_positions().T)
         assert len(surf_zs) == len(atoms)
-        tags = np.full(shape = len(pos), fill_value = -1, dtype = np.int)
+        tags = np.full(shape = len(surf_zs), fill_value = -1, dtype = np.int)
 
         for layer_i, height in enumerate(layer_heights):
             mask = (surf_zs >= height - half_dists[layer_i]) & (surf_zs <= height + half_dists[layer_i + 1])
@@ -76,7 +76,7 @@ def agree_within_layers_and_deposits(layerfunc, surface_layer_index = 4, cutoff 
         # We take connected groups of adatoms, since they are within a distance
         # of influencing one another, as an agreement group
         conn_mat = pbcc.pairwise_distances(pos[adatom_mask])
-        conn_mat = conn_mat < radius
+        conn_mat = conn_mat < cutoff
         n_groups, groups = connected_components(conn_mat, directed = False)
         logger.debug("Found %i adatoms in %i independent deposits" % (np.sum(adatom_mask), n_groups))
 

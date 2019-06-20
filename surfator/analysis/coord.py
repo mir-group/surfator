@@ -3,6 +3,7 @@ import numpy as np
 
 from ase.neighborlist import NewPrimitiveNeighborList
 
+from sitator.util.progress import tqdm
 
 def calculate_coord_numbers(traj, atoms, cutoff, skin = 0):
     """Compute the coordination numbers for all atoms at all times in `traj`.
