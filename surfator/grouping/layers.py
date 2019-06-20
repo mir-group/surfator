@@ -4,6 +4,8 @@ import math
 
 import ase
 
+from scipy.sparse.csgraph import connected_components
+
 from sitator.util import PBCCalculator
 
 import logging

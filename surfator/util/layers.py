@@ -14,6 +14,8 @@ def get_layer_heights_kmeans(traj, cell, n, surface_normal = np.array([0, 0, 1])
         - n (int): The number of layers to identify (the k for k-means).
         - surface_normal (3-vector): A unit vector normal to the surface. Defaults
             to the z direction <0, 0, 1>.
+    Returns:
+        sorted ndarray of heights along surface normal
     """
     from sklearn.cluster import KMeans
 

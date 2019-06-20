@@ -53,7 +53,9 @@ class StructureGroupAnalysis(object):
             cutoff,
             agreement_group_function = surfator.grouping.all_atoms_agree,
             structure_group_compatability = None,
-            skin = 0.1):
+            skin = 0.1,
+            return_unwrapped_clamped_traj = False,
+            unwrapped_clamped_passthrough = True):
         """
         Args:
             - ref_sn (SiteNetwork): A `SiteNetwork` containing the sites to which
@@ -85,6 +87,17 @@ class StructureGroupAnalysis(object):
                 assumed to be `True`, that is, all structure groups are compatable.
             - skin (float): Skin to use for the underlying ASE `NeighborList`.
                 Defaults to 0.1.
+            - return_unwrapped_clamped_traj (bool, default: False): A byproduct
+                of this analysis is a trajectory where mobile atoms are "clamped"
+                to the nearest periodic image of their site (i.e. if the trajectory
+                is unwrapped, the clamped trajectory is too). If set to true,
+                this trajectory is returned.
+            - unwrapped_clamped_passthrough (bool, defualt: True): Relevant
+                if `return_unwrapped_clamped_traj == True`. If a mobile atom
+                cannot be assigned and this is set to True, its unprocessed
+                position will be passed through to the unwrapped clamped
+                trajectory. If this is False, its clamped position at that frame
+                will be NaNs.
         Returns:
             a SiteTrajectory
         """
@@ -148,11 +161,14 @@ class StructureGroupAnalysis(object):
         average_majority_n = 0
         min_majority = np.inf
         site_assignments = np.full(shape = (n_frames, n_mob_atoms), fill_value = -1, dtype = np.int)
+        if return_unwrapped_clamped_traj:
+            outtraj = np.full_like(traj, np.nan)
 
         # Buffers
         nearest_neighbors = np.empty(shape = n_mob_atoms, dtype = np.int)
         can_assign_to = np.empty(shape = n_ref_atoms + n_mob_atoms, dtype = np.bool)
         structgrps_seen = np.empty(shape = n_structgrps, dtype = np.bool)
+        assigned = np.ones(shape = n_mob_atoms, dtype = np.bool)
 
         # -- Do structure group analysis --
         for frame_idex, frame in enumerate(tqdm(traj)):
@@ -172,6 +188,8 @@ class StructureGroupAnalysis(object):
 
             # Seen no structure groups yet
             structgrps_seen.fill(False)
+            # Assume all assigned
+            assigned.fill(True)
 
             # - (2) - Update neighbor list
             nl.update(full_struct)
@@ -194,23 +212,32 @@ class StructureGroupAnalysis(object):
 
                     for mob_i in to_assign:
                         neighbor_idex, neighbor_offset = nl.get_neighbors(n_ref_atoms + mob_i)
-                        neighbor_mic_positions = (full_struct.get_positions()[neighbor_idex] + np.dot(neighbor_offset, ref_structure.cell))
+                        if len(neighbor_idex) > 0:
+                            neighbor_mic_positions = (full_struct.get_positions()[neighbor_idex] + np.dot(neighbor_offset, ref_structure.cell))
+                            neighbor_dists = np.linalg.norm(full_struct.get_positions()[n_ref_atoms + mob_i] - neighbor_mic_positions, axis = 1)
+                            # Take can_assign_to into account
+                            neighbor_dists[~can_assign_to[neighbor_idex]] = np.inf
+                            nearest_neighbor = np.argmin(neighbor_dists)
+                            nn_dist = neighbor_dists[nearest_neighbor]
+                            assert nn_dist < np.inf, "Had no site options for mobile atom %i in agreegrp %i" % (mob_i, agreegrp_i)
+                            assert nn_dist < cutoff + 2 * skin, "Neighborlist somehow returned neighbors over its cutoff + 2 * skin. This should not happen."
 
-                        neighbor_dists = np.linalg.norm(full_struct.get_positions()[n_ref_atoms + mob_i] - neighbor_mic_positions, axis = 1)
-                        # Take can_assign_to into account
-                        neighbor_dists[~can_assign_to[neighbor_idex]] = np.inf
-                        nearest_neighbor = np.argmin(neighbor_dists)
-                        nn_dist = neighbor_dists[nearest_neighbor]
-                        assert nn_dist < np.inf, "Had no site options for mobile atom %i in agreegrp %i" % (mob_i, agreegrp_i)
-                        assert nn_dist < cutoff + 2 * skin, "Neighborlist somehow returned neighbors over its cutoff + 2 * skin. This should not happen."
-
-                        nearest_neighbors[mob_i] = neighbor_idex[nearest_neighbor]
+                            nearest_neighbors[mob_i] = neighbor_idex[nearest_neighbor]
+                            if return_unwrapped_clamped_traj:
+                                outtraj[frame_idex, mob_i] = neighbor_mic_positions[nearest_neighbor]
+                        else:
+                            # Can't assign this one
+                            logger.warning("At frame %i couldn't assign mobile atom %i" % (frame_idex, mob_i))
+                            nearest_neighbors[mob_i] = -1
+                            assigned[mob_i] = False
+                            if return_unwrapped_clamped_traj and unwrapped_clamped_passthrough:
+                                outtraj[frame_idex, mob_i] = frame[mob_i]
                         site_assignments[frame_idex, mob_i] = nearest_neighbors[mob_i]
 
                     if is_last_round:
                         break
                     else:
-                        structgrp_assignments = structgrps[nearest_neighbors[agreegrp]]
+                        structgrp_assignments = structgrps[nearest_neighbors[agreegrp & assigned]]
                         candidates, votes = np.unique(structgrp_assignments, return_counts = True)
                         winner_idex = np.argmax(votes)
                         winner = candidates[winner_idex]
@@ -244,4 +271,7 @@ class StructureGroupAnalysis(object):
         out_st = SiteTrajectory(ref_sn, site_assignments)
         out_st.set_real_traj(traj)
         self._has_run = True
-        return out_st
+        if return_unwrapped_clamped_traj:
+            return out_st, outtraj
+        else:
+            return out_st
