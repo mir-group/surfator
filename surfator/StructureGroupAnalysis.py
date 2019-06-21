@@ -67,7 +67,7 @@ class StructureGroupAnalysis(object):
                  runoff_votes_weight = 0.5,
                  winner_bias = 0.5,
                  error_on_no_majority = True,
-                 self.eps_factor = 0.05):
+                 eps_factor = 0.05):
         assert 0 <= min_winner_percentage <= 1
         self.min_winner_percentage = min_winner_percentage
         assert 0 <= runoff_votes_weight <= 1
