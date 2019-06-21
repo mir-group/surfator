@@ -66,7 +66,8 @@ class StructureGroupAnalysis(object):
                  min_winner_percentage = 0.50001,
                  runoff_votes_weight = 0.5,
                  winner_bias = 0.5,
-                 error_on_no_majority = True):
+                 error_on_no_majority = True,
+                 self.eps_factor = 0.05):
         assert 0 <= min_winner_percentage <= 1
         self.min_winner_percentage = min_winner_percentage
         assert 0 <= runoff_votes_weight <= 1
@@ -75,12 +76,14 @@ class StructureGroupAnalysis(object):
         assert 0 <= winner_bias < 1
         self.winner_bias = winner_bias
         self.error_on_no_majority = error_on_no_majority
+        self.eps_factor = eps_factor
 
 
     def run(self,
             ref_sn,
             traj,
             cutoff,
+            k_neighbor = 10,
             agreement_group_function = surfator.grouping.all_atoms_agree,
             structure_group_compatability = None):
         """
@@ -91,14 +94,8 @@ class StructureGroupAnalysis(object):
                 attribute `STRUCTURE_GROUP_ATTRIBUTE` indicates, for each site,
                 which structure group it belongs to.
             - traj (ndarray, n_frames x n_atoms x 3):
-            - cutoff (ndarray or float): Cutoff radii can be given in `ref_sn`
-                for the sites with site attribute SITE_RADIUS_ATTRIBUTE. If none
-                are given, they will be set to `0.5 * cutoff`. If an array is
-                given for `cutoff`, radii must be provided in `ref_sn`. Radii for
-                the mobile atoms can be given through `cutoff` either as a single
-                float cutoff, half of which is then used as the radius for all
-                mobile atoms, or as an array of radii for each mobile atom which
-                are not modified. In distance units.
+            - cutoff (float, distance): The maximum distance between a mobile atom
+                and the site it is assigned to.
             - agreement_group_function (callable taking an Atoms): A function that,
                 given an `Atoms` object containing the current positions of the
                 mobile atoms, returns labels indicating their membership in
@@ -114,6 +111,14 @@ class StructureGroupAnalysis(object):
                 `True`, that is, all structure groups are compatable.
             - skin (float): Skin to use for the underlying ASE `NeighborList`.
                 Defaults to 0.1.
+            - k_neighbor (int): An internal implementation parameter. How many
+                nearest neighbors in cell coordinate space to consider in real
+                space. If too small, actual nearest sites can be missed. Increasing
+                directly controls performance by determining the number of
+                KDTree queries and distance calculations needed. Defaults to 6.
+            - eps_factor (float): Set eps (for KDTree queries, see scipy documentation)
+                to eps_factor * cutoff. Defaults to 0.05 (5%), which gives a
+                meaningful performance increase with no real cost to accuracy.
         Returns:
             a SiteTrajectory
         """
@@ -121,6 +126,8 @@ class StructureGroupAnalysis(object):
         n_frames = traj.shape[0]
         n_ref_atoms = ref_sn.n_sites
         n_mob_atoms = ref_sn.n_mobile
+        centers = ref_sn.centers
+        eps = self.eps_factor * cutoff
         assert len(ref_sn.mobile_mask) == traj.shape[1]
         assert traj.shape[2] == 3
 
@@ -184,7 +191,6 @@ class StructureGroupAnalysis(object):
         assigned = np.ones(shape = n_mob_atoms, dtype = np.bool)
         site_weights = np.ones(shape = n_ref_atoms, dtype = np.float)
         site_available = np.ones(shape = n_ref_atoms, dtype = np.bool)
-        k_neighbor = 20
         neighbor_dist = np.empty(shape = k_neighbor, dtype = np.float)
 
         # -- Do structure group analysis --
@@ -229,20 +235,25 @@ class StructureGroupAnalysis(object):
                         is_last_round = True
 
                     for mob_i in to_assign:
-                        kd_neighbor_dist, neighbor_idex = kdtree.query(frame[mob_i], k = k_neighbor, distance_upper_bound = cutoff_cell_coords)
+                        kd_neighbor_dist, neighbor_idex = kdtree.query(frame[mob_i], k = k_neighbor, distance_upper_bound = cutoff_cell_coords, eps = eps)
+                        # Remove non-existant neighbors
+                        neighbor_idex = neighbor_idex[np.isfinite(kd_neighbor_dist)]
                         # Euclidean distances in cell space are rather meaningless -- recompute them in real space
-                        pbcc.distances(traj[frame_idex, mob_i], ref_sn.centers[neighbor_idex], out = neighbor_dist)
+                        # We can do in_place since `[neighbor_idex]` is a list of indexes,
+                        # so indexing centers with it gives a copy anyway
+                        neighbor_dist = pbcc.distances(traj[frame_idex, mob_i], centers[neighbor_idex], in_place = True)
                         if len(neighbor_idex) > 0:
-                            # inf in kd distances indicates no neighbor, set to inf
-                            neighbor_dist[np.isinf(kd_neighbor_dist)] = np.inf
+                            # Apply site weights
+                            # We do this first so we're only doing arithmetic with
+                            # real floats (no infs) to avoid NaNs, to avoid the performance
+                            # hit of NaN checking in `np.nanargmin`
+                            neighbor_dist *= site_weights[neighbor_idex]
                             # Apply can_assign_to
                             neighbor_dist[~can_assign_to[neighbor_idex]] = np.inf
                             # Strict distance cutoff:
                             neighbor_dist[neighbor_dist > cutoff] = np.inf
-                            # Apply site weights -- Products with 0 and Inf give NaN, for which < Inf gives False, so we're OK
-                            neighbor_dist *= site_weights[neighbor_idex]
-                            nearest_neighbor = np.nanargmin(neighbor_dist)
-                            assert neighbor_dist[nearest_neighbor] < np.inf, "Had no site options for mobile atom %i in agreegrp %i" % (mob_i, agreegrp_i)
+                            nearest_neighbor = np.argmin(neighbor_dist)
+                            assert neighbor_dist[nearest_neighbor] < np.inf, "Had no site options for mobile atom %i in agreegrp %i. If k_neighbor is small, increase it?" % (mob_i, agreegrp_i)
                             nearest_neighbors[mob_i] = neighbor_idex[nearest_neighbor]
                         else:
                             # Can't assign this one
