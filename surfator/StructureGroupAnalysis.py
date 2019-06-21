@@ -45,16 +45,36 @@ class StructureGroupAnalysis(object):
         - min_winner_percentage (float): Proportion of an agreement group's votes
             that the election winner must receive. Defaults to 50.001%; values
             smaller than half should be used with caution.
+        - runoff_votes_weight (float): Atoms in an agreement group that voted
+            for groups compatible with the candidate that won the most votes
+            can cast "runoff" votes for that leading candidate. The impact of
+            those votes is controlled by this parameter: at a value of 0, they
+            have no effect; at a value of 1 a runoff vote from a compatable
+            candidate is as good as one for the leading candidate directly.
+            This helps to break ties and increase majorities in uncertain votes.
+        - winner_bias (float): Whether (and by how much) to bias the assignment
+            to the winning structure group. All compatible structure groups to the
+            winner are available for assignment, but sites belonging to the
+            winning structure group can be made more appealing. A value of 0
+            indicates no bias; a value of 1 ensures the choice of a winning
+            structure group site (assuming one exists within the cutoff distnace).
+        - error_on_no_majority (bool): If True, a majority below `min_winner_percentage`
+            will result in an error. If False, that agreement group will simply
+            be unassigned at that time.
     """
     def __init__(self,
                  min_winner_percentage = 0.50001,
                  runoff_votes_weight = 0.5,
-                 winner_bias = 0.5):
+                 winner_bias = 0.5,
+                 error_on_no_majority = True):
+        assert 0 <= min_winner_percentage <= 1
         self.min_winner_percentage = min_winner_percentage
+        assert 0 <= runoff_votes_weight <= 1
         self.runoff_votes_weight = runoff_votes_weight
         self._has_run = False
         assert 0 <= winner_bias < 1
         self.winner_bias = winner_bias
+        self.error_on_no_majority = error_on_no_majority
 
 
     def run(self,
@@ -155,7 +175,7 @@ class StructureGroupAnalysis(object):
         average_majority = 0.
         average_majority_n = 0
         min_majority = np.inf
-        site_assignments = np.full(shape = (n_frames, n_mob_atoms), fill_value = -1, dtype = np.int)
+        site_assignments = np.full(shape = (n_frames, n_mob_atoms), fill_value = -20, dtype = np.int)
 
         # Buffers
         nearest_neighbors = np.empty(shape = n_mob_atoms, dtype = np.int)
@@ -257,7 +277,14 @@ class StructureGroupAnalysis(object):
                         average_majority_n += 1
 
                         if majority < self.min_winner_percentage:
-                            raise StructureGroupVotingError("Winning structure group for agreegrp %i at frame %i got (%i + %.1f runoff = %.1f)/%i = %i%% votes, which is below set threshold of %i%%" % (agreegrp_order[agreegrp_i], frame_idex, votes[winner_idex], runoff_votes, total_votes, len(structgrp_assignments), 100 * total_votes / len(structgrp_assignments), 100 * self.min_winner_percentage))
+                            msg = "Winning structure group for agreegrp %i at frame %i got (%i + %.1f runoff = %.1f)/%i = %i%% votes, which is below set threshold of %i%%" % (agreegrp_order[agreegrp_i], frame_idex, votes[winner_idex], runoff_votes, total_votes, len(structgrp_assignments), 100 * total_votes / len(structgrp_assignments), 100 * self.min_winner_percentage)
+                            if self.error_on_no_majority:
+                                raise StructureGroupVotingError(msg)
+                            else:
+                                logger.warning(msg + "; marking them unassigned.")
+                                site_assignments[frame_idex, agreegrp_mask] = SiteTrajectory.SITE_UNKNOWN
+                                break # Leave the last_rount loop; takes us to the next agreegrp
+
                         logger.debug("At frame %i agreegrp %i voted for structgrp %i with majority (%i + %.1f runoff = %.1f)/%i" % (frame_idex, agreegrp_i, winner, votes[winner_idex], runoff_votes, total_votes, len(structgrp_assignments)))
 
                         # Assign only to structure groups compatable with the winner
@@ -276,7 +303,7 @@ class StructureGroupAnalysis(object):
         self.average_majority = average_majority / average_majority_n
         self.minimum_majority = min_majority
 
-        assert np.min(site_assignments) >= 0 # Make sure all atoms assigned at all times
+        assert np.min(site_assignments) >= -1 # Make sure all atoms assigned or intentionally unassigned at all times
         out_st = SiteTrajectory(ref_sn, site_assignments)
         out_st.set_real_traj(traj)
         self._has_run = True
