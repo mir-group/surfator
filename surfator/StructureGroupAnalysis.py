@@ -48,10 +48,13 @@ class StructureGroupAnalysis(object):
     """
     def __init__(self,
                  min_winner_percentage = 0.50001,
-                 runoff_votes_weight = 0.5):
+                 runoff_votes_weight = 0.5,
+                 winner_bias = 0.5):
         self.min_winner_percentage = min_winner_percentage
         self.runoff_votes_weight = runoff_votes_weight
         self._has_run = False
+        assert 0 <= winner_bias < 1
+        self.winner_bias = winner_bias
 
 
     def run(self,
@@ -132,6 +135,14 @@ class StructureGroupAnalysis(object):
         site_pos_cell_coords = ref_sn.centers.copy()
         pbcc.to_cell_coords(site_pos_cell_coords)
 
+        # Different cell dimensions have different sizes. Since this is for the
+        # kdtree, we're gonna be generous and then be accurately conservative
+        # with the real-space distances.
+        cutoff_cell_coords = np.min(np.linalg.norm(ref_sn.structure.cell, axis = 1))
+        logger.debug("Magnitude of largest cell vector: %f" % cutoff_cell_coords)
+        cutoff_cell_coords = cutoff / cutoff_cell_coords
+        logger.debug("Cell coord. cutoff: %f" % cutoff_cell_coords)
+
         kdtree = cKDTree(
             data = site_pos_cell_coords,
             boxsize = 1 # Make it periodic
@@ -151,6 +162,10 @@ class StructureGroupAnalysis(object):
         can_assign_to = np.empty(shape = n_ref_atoms + n_mob_atoms, dtype = np.bool)
         structgrps_seen = np.empty(shape = n_structgrps, dtype = np.bool)
         assigned = np.ones(shape = n_mob_atoms, dtype = np.bool)
+        site_weights = np.ones(shape = n_ref_atoms, dtype = np.float)
+        site_available = np.ones(shape = n_ref_atoms, dtype = np.bool)
+        k_neighbor = 20
+        neighbor_dist = np.empty(shape = k_neighbor, dtype = np.float)
 
         # -- Do structure group analysis --
         for frame_idex, frame in enumerate(tqdm(cell_coord_traj)):
@@ -165,16 +180,21 @@ class StructureGroupAnalysis(object):
                 agreegrp_order = np.unique(agreegrp_labels)
                 agreegrp_order.sort()
             agreegrp_masks = [agreegrp_labels == lbl for lbl in agreegrp_order]
+            logger.debug("At frame %i had %i agreegrps: %s of sizes %s" % (frame_idex, len(agreegrp_masks), agreegrp_order, [np.sum(m) for m in agreegrp_masks]))
             assert not np.any(np.logical_and.reduce(agreegrp_masks, axis = 0)), "Two or more agreement groups intersected at frame %i" % frame_idex
+            assert np.all(np.logical_or.reduce(agreegrp_masks, axis = 0)), "Not all mobile atoms were assigned to an agreegrp"
 
             # Seen no structure groups yet
             structgrps_seen.fill(False)
             # Assume all assigned
             assigned.fill(True)
+            site_available.fill(True)
 
             # - (2) - In order, assign the agreegrps
             for agreegrp_i, agreegrp_mask in enumerate(agreegrp_masks):
+                site_weights.fill(1.0)
                 can_assign_to[:n_ref_atoms] = np.logical_and.reduce(ref_atoms_compatable_with[structgrps_seen])
+                can_assign_to[:n_ref_atoms] &= site_available
                 can_assign_to[n_ref_atoms:] = False # Can never assign to mobile atom
                 n_can_assign = np.sum(can_assign_to)
                 assert n_can_assign <= n_ref_atoms
@@ -189,12 +209,20 @@ class StructureGroupAnalysis(object):
                         is_last_round = True
 
                     for mob_i in to_assign:
-                        neighbor_dist, neighbor_idex = kdtree.query(frame[mob_i], k = 5, distance_upper_bound = cutoff)
+                        kd_neighbor_dist, neighbor_idex = kdtree.query(frame[mob_i], k = k_neighbor, distance_upper_bound = cutoff_cell_coords)
+                        # Euclidean distances in cell space are rather meaningless -- recompute them in real space
+                        pbcc.distances(traj[frame_idex, mob_i], ref_sn.centers[neighbor_idex], out = neighbor_dist)
                         if len(neighbor_idex) > 0:
-                            # The nearest is the first that `can_assign_to`, since
-                            # they're already sorted by distance
-                            nearest_neighbor = np.argmax(can_assign_to[neighbor_idex])
-                            assert neighbor_dist[nearest_neighbor] < np.inf and can_assign_to[neighbor_idex[nearest_neighbor]], "Had no site options for mobile atom %i in agreegrp %i" % (mob_i, agreegrp_i)
+                            # inf in kd distances indicates no neighbor, set to inf
+                            neighbor_dist[np.isinf(kd_neighbor_dist)] = np.inf
+                            # Apply can_assign_to
+                            neighbor_dist[~can_assign_to[neighbor_idex]] = np.inf
+                            # Strict distance cutoff:
+                            neighbor_dist[neighbor_dist > cutoff] = np.inf
+                            # Apply site weights -- Products with 0 and Inf give NaN, for which < Inf gives False, so we're OK
+                            neighbor_dist *= site_weights[neighbor_idex]
+                            nearest_neighbor = np.nanargmin(neighbor_dist)
+                            assert neighbor_dist[nearest_neighbor] < np.inf, "Had no site options for mobile atom %i in agreegrp %i" % (mob_i, agreegrp_i)
                             nearest_neighbors[mob_i] = neighbor_idex[nearest_neighbor]
                         else:
                             # Can't assign this one
@@ -202,6 +230,8 @@ class StructureGroupAnalysis(object):
                             nearest_neighbors[mob_i] = -1
                             assigned[mob_i] = False
                         site_assignments[frame_idex, mob_i] = nearest_neighbors[mob_i]
+                        if is_last_round:
+                            site_available[nearest_neighbors[mob_i]] = False
 
                     if is_last_round:
                         break
@@ -227,13 +257,14 @@ class StructureGroupAnalysis(object):
                         average_majority_n += 1
 
                         if majority < self.min_winner_percentage:
-                            raise StructureGroupVotingError("Winning structure group got (%i + %.1f runoff = %.1f)/%i = %i%% votes, which is below set threshold of %i%%" % (votes[winner_idex], runoff_votes, total_votes, len(structgrp_assignments), 100 * votes[winner_idex] / len(structgrp_assignments), 100 * self.min_winner_percentage))
+                            raise StructureGroupVotingError("Winning structure group for agreegrp %i at frame %i got (%i + %.1f runoff = %.1f)/%i = %i%% votes, which is below set threshold of %i%%" % (agreegrp_order[agreegrp_i], frame_idex, votes[winner_idex], runoff_votes, total_votes, len(structgrp_assignments), 100 * total_votes / len(structgrp_assignments), 100 * self.min_winner_percentage))
                         logger.debug("At frame %i agreegrp %i voted for structgrp %i with majority (%i + %.1f runoff = %.1f)/%i" % (frame_idex, agreegrp_i, winner, votes[winner_idex], runoff_votes, total_votes, len(structgrp_assignments)))
 
                         # Assign only to structure groups compatable with the winner
                         # We do &= because constraints imposed by previous agreegrps
                         # take precidence.
                         can_assign_to[:n_ref_atoms] &= ref_atoms_compatable_with[winner]
+                        site_weights[ref_atoms_of_group[winner]] = 1 - self.winner_bias
                         # Though technically we only need to reprocess those that
                         # were incompatible with the winner, the neighborlist
                         # already exists and reassigning them all is easier
@@ -241,6 +272,9 @@ class StructureGroupAnalysis(object):
                         # Keep track -- the winner is now "seen"
                         structgrps_seen[winner] = True
                         # Now we loop and reassign
+
+        self.average_majority = average_majority / average_majority_n
+        self.minimum_majority = min_majority
 
         assert np.min(site_assignments) >= 0 # Make sure all atoms assigned at all times
         out_st = SiteTrajectory(ref_sn, site_assignments)
