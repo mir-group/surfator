@@ -53,7 +53,7 @@ def agree_within_layers_kmeans(initial_layer_heights, surface_normal = np.array(
     return func
 
 
-def agree_within_layers(layer_heights, surface_normal = np.array([0, 0, 1])):
+def agree_within_layers(layer_heights, surface_normal = np.array([0, 0, 1]), cutoff_above_top = None, cutoff_below_bottom = None):
     """Assign mobile atoms to agreement groups based on their layer in the material.
 
     In a system with fixed layers, like a surface slab (especially one with a
@@ -63,14 +63,23 @@ def agree_within_layers(layer_heights, surface_normal = np.array([0, 0, 1])):
 
     Args:
         - layer_heights (ndarray): The "heights" (positions in normal coordinates)
-            of the layers.
+            of the layers. Should be sorted, ascending.
         - surface_normal (3-vector): The unit normal vector to the surface.
+        - cutoff_above_top (float): The maximum distance above the topmost layer
+            within which an atom can be assigned to it. If None, set to half the
+            maximum interlayer distance.
+        - cutoff_below_bottom (float): Same as `cutoff_above_top` but for the
+            bottommost layer.
     """
     assert math.isclose(np.linalg.norm(surface_normal), 1.), "Given `surface_normal` is not a unit vector."
 
+    assert np.all(np.argsort(layer_heights) == np.arange(len(layer_heights)))
+
     diffs = layer_heights[1:] - layer_heights[:-1]
     maxdif = np.max(diffs)
-    half_dists = np.concatenate(([maxdif], diffs, [maxdif]))
+    half_dists = np.concatenate(([maxdif if cutoff_below_bottom is None else cutoff_below_bottom * 2],
+                                 diffs,
+                                 [maxdif if cutoff_above_top is None else cutoff_above_top * 2]))
     half_dists *= 0.5
     assert len(half_dists) == len(layer_heights) + 1
 
