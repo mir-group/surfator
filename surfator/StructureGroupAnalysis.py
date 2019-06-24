@@ -31,7 +31,8 @@ def analysis_result(func):
 SITE_RADIUS_ATTRIBUTE = 'site_radius'
 STRUCTURE_GROUP_ATTRIBUTE = 'structure_group'
 
-AGREE_GROUP_NONE = -1
+AGREE_GROUP_NONE = -1 # No agreement needed, but assignment will still occur
+AGREE_GROUP_UNASSIGNED = -2 # Will simply be marked as unassigned
 
 class StructureGroupVotingError(Exception):
     pass
@@ -218,6 +219,13 @@ class StructureGroupAnalysis(object):
 
             # - (2) - In order, assign the agreegrps
             for agreegrp_i, agreegrp_mask in enumerate(agreegrp_masks):
+                # The UNASSIGNED agreegrp are those atoms that couldn't be
+                # figured out, and we want that unassigned status to percolate
+                # up into the SiteTrajectory
+                if agreegrp_order[agreegrp_i] == AGREE_GROUP_UNASSIGNED:
+                    site_assignments[frame_idex, agreegrp_mask] = SiteTrajectory.SITE_UNKNOWN
+                    continue
+
                 site_weights.fill(1.0)
                 can_assign_to[:n_ref_atoms] = np.logical_and.reduce(ref_atoms_compatable_with[structgrps_seen])
                 can_assign_to[:n_ref_atoms] &= site_available

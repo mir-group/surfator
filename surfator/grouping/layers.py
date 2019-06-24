@@ -89,13 +89,14 @@ def agree_within_layers(layer_heights, surface_normal = np.array([0, 0, 1]), cut
         atoms.wrap()
         surf_zs = np.dot(surface_normal, atoms.get_positions().T)
         assert len(surf_zs) == len(atoms)
-        tags = np.full(shape = len(surf_zs), fill_value = -1, dtype = np.int)
+        tags = np.full(shape = len(surf_zs), fill_value = surfator.AGREE_GROUP_UNASSIGNED, dtype = np.int)
 
         for layer_i, height in enumerate(layer_heights):
             mask = (surf_zs >= height - half_dists[layer_i]) & (surf_zs <= height + half_dists[layer_i + 1])
             tags[mask] = layer_i
 
-        assert np.min(tags) >= 0
+        if np.min(tags) < 0:
+            logger.warning("Couldn't assign atoms %s to layers" % np.where(tags < 0)[0])
 
         return tags
 
