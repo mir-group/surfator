@@ -90,7 +90,7 @@ class StructureGroupAnalysis(object):
             k_neighbor = 10,
             agreement_group_function = surfator.grouping.all_atoms_agree,
             structure_group_compatability = None,
-            return_agreegrp_assignments = False):
+            return_assignments = False):
         """
         Args:
             - ref_sn (SiteNetwork): A `SiteNetwork` containing the sites to which
