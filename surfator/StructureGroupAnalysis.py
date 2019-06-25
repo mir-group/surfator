@@ -62,6 +62,9 @@ class StructureGroupAnalysis(object):
         - error_on_no_majority (bool): If True, a majority below `min_winner_percentage`
             will result in an error. If False, that agreement group will simply
             be unassigned at that time.
+        - eps_factor (float): Set eps (for KDTree queries, see scipy documentation)
+            to eps_factor * cutoff. Defaults to 0.05 (5%), which gives a
+            meaningful performance increase with no real cost to accuracy.
     """
     def __init__(self,
                  min_winner_percentage = 0.50001,
@@ -86,7 +89,8 @@ class StructureGroupAnalysis(object):
             cutoff,
             k_neighbor = 10,
             agreement_group_function = surfator.grouping.all_atoms_agree,
-            structure_group_compatability = None):
+            structure_group_compatability = None,
+            return_agreegrp_assignments = False):
         """
         Args:
             - ref_sn (SiteNetwork): A `SiteNetwork` containing the sites to which
@@ -110,18 +114,19 @@ class StructureGroupAnalysis(object):
                 Symmetry is assumed. The side length is `max(site_groups)`.
                 Defaults to `None`, in which case all entries are assumed to be
                 `True`, that is, all structure groups are compatable.
-            - skin (float): Skin to use for the underlying ASE `NeighborList`.
-                Defaults to 0.1.
             - k_neighbor (int): An internal implementation parameter. How many
                 nearest neighbors in cell coordinate space to consider in real
                 space. If too small, actual nearest sites can be missed. Increasing
                 directly controls performance by determining the number of
                 KDTree queries and distance calculations needed. Defaults to 6.
-            - eps_factor (float): Set eps (for KDTree queries, see scipy documentation)
-                to eps_factor * cutoff. Defaults to 0.05 (5%), which gives a
-                meaningful performance increase with no real cost to accuracy.
+            - return_assignments (bool): Whether to return which agreement
+                group and which structure group each mobile atom was assigned to
+                at each frame. Depending on `agreement_group_function`, the
+                labels for agreement groups might change from
+                frame to frame and be meaningless -- please check your
+                `agreement_group_function` to see if this makes sense.
         Returns:
-            a SiteTrajectory
+            a SiteTrajectory[, agreegrp_assignments, structgrp_assignments]
         """
         # -- Housekeeping --
         n_frames = traj.shape[0]
@@ -184,6 +189,8 @@ class StructureGroupAnalysis(object):
         average_majority_n = 0
         min_majority = np.inf
         site_assignments = np.full(shape = (n_frames, n_mob_atoms), fill_value = -20, dtype = np.int)
+        if return_assignments:
+            agreegrp_assignments = np.empty(shape = (n_frames, n_mob_atoms), dtype = np.int)
 
         # Buffers
         nearest_neighbors = np.empty(shape = n_mob_atoms, dtype = np.int)
@@ -195,11 +202,13 @@ class StructureGroupAnalysis(object):
         neighbor_dist = np.empty(shape = k_neighbor, dtype = np.float)
 
         # -- Do structure group analysis --
-        for frame_idex, frame in enumerate(tqdm(cell_coord_traj)):
+        for frame_idex, frame in enumerate(tqdm(cell_coord_traj, description = "Assigning sites")):
             mobile_struct.positions[:] = traj[frame_idex, ref_sn.mobile_mask]
 
             # - (1) - Determine agreement groups
             agreegrp_labels = agreement_group_function(mobile_struct)
+            if return_assignments:
+                agreegrp_assignments[frame_idex] = agreegrp_labels
             if isinstance(agreegrp_labels, tuple): # An ordering was given
                 agreegrp_labels, agreegrp_order = agreegrp_labels
             else:
@@ -326,4 +335,9 @@ class StructureGroupAnalysis(object):
         out_st = SiteTrajectory(ref_sn, site_assignments)
         out_st.set_real_traj(traj)
         self._has_run = True
-        return out_st
+        if return_assignments:
+            translation = np.concatenate((structgrps, [-1]))
+            structgrp_assignments = translation[site_assignments]
+            return out_st, agreegrp_assignments, structgrp_assignments
+        else:
+            return out_st

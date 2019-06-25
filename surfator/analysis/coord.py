@@ -25,7 +25,7 @@ def calculate_coord_numbers(traj, atoms, cutoff, skin = 0, mask = None):
     mask_idexes = np.where(mask)[0]
 
     out = np.full(shape = (len(traj), np.sum(mask)), fill_value = -1, dtype = np.int)
-    
+
     nl = NewPrimitiveNeighborList(cutoffs = np.full(n_atoms, cutoff * 0.5),
                                   skin = skin,
                                   self_interaction = False,
@@ -35,7 +35,7 @@ def calculate_coord_numbers(traj, atoms, cutoff, skin = 0, mask = None):
              cell = atoms.cell,
              positions = atoms.get_positions())
 
-    for f_idex, frame in enumerate(tqdm(traj)):
+    for f_idex, frame in enumerate(tqdm(traj, description = "Coord. nums.")):
         nl.update(pbc = atoms.pbc,
                   cell = atoms.cell,
                   positions = frame)
