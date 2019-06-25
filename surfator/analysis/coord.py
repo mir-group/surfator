@@ -35,7 +35,7 @@ def calculate_coord_numbers(traj, atoms, cutoff, skin = 0, mask = None):
              cell = atoms.cell,
              positions = atoms.get_positions())
 
-    for f_idex, frame in enumerate(tqdm(traj, description = "Coord. nums.")):
+    for f_idex, frame in enumerate(tqdm(traj)):
         nl.update(pbc = atoms.pbc,
                   cell = atoms.cell,
                   positions = frame)

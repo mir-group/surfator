@@ -202,7 +202,7 @@ class StructureGroupAnalysis(object):
         neighbor_dist = np.empty(shape = k_neighbor, dtype = np.float)
 
         # -- Do structure group analysis --
-        for frame_idex, frame in enumerate(tqdm(cell_coord_traj, description = "Assigning sites")):
+        for frame_idex, frame in enumerate(tqdm(cell_coord_traj)):
             mobile_struct.positions[:] = traj[frame_idex, ref_sn.mobile_mask]
 
             # - (1) - Determine agreement groups
