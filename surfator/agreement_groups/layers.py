@@ -28,7 +28,7 @@ def agree_within_layers_kmeans(initial_layer_heights, surface_normal = np.array(
         - min_layer_dist (float, distance): The minimum height difference between
             two layers' centers.
     """
-    assert math.isclose(np.linalg.norm(surface_normal), 1.), "Given `surface_normal` is not a unit vector."
+    assert math.isclose(np.linalg.norm(surface_normal), 1., rel_tol = 1e-07), "Given `surface_normal` is not a unit vector."
     from sklearn.cluster import KMeans
 
     n_layers = len(initial_layer_heights)
@@ -71,7 +71,7 @@ def agree_within_layers(layer_heights, surface_normal = np.array([0, 0, 1]), cut
         - cutoff_below_bottom (float): Same as `cutoff_above_top` but for the
             bottommost layer.
     """
-    assert math.isclose(np.linalg.norm(surface_normal), 1.), "Given `surface_normal` is not a unit vector."
+    assert math.isclose(np.linalg.norm(surface_normal), 1., rel_tol = 1e-07), "Given `surface_normal` is not a unit vector."
 
     assert np.all(np.argsort(layer_heights) == np.arange(len(layer_heights)))
 
