@@ -12,7 +12,7 @@ from sitator import SiteNetwork, SiteTrajectory
 from sitator.util.progress import tqdm
 from sitator.util import PBCCalculator
 
-import surfator.grouping
+import surfator.agreement_groups
 
 import logging
 logger = logging.getLogger(__name__)
@@ -33,6 +33,8 @@ STRUCTURE_GROUP_ATTRIBUTE = 'structure_group'
 
 AGREE_GROUP_NONE = -1 # No agreement needed, but assignment will still occur
 AGREE_GROUP_UNASSIGNED = -2 # Will simply be marked as unassigned
+
+N_ROUNDS = 3
 
 class StructureGroupVotingError(Exception):
     pass
@@ -88,7 +90,7 @@ class StructureGroupAnalysis(object):
             traj,
             cutoff,
             k_neighbor = 10,
-            agreement_group_function = surfator.grouping.all_atoms_agree,
+            agreement_group_function = surfator.agreement_groups.all_atoms_agree,
             structure_group_compatability = None,
             return_assignments = False):
         """
@@ -107,13 +109,14 @@ class StructureGroupAnalysis(object):
                 "agreement groups." All atoms in an agreement group at some frame
                 must agree, by a majority vote (see `min_winner_percentage`),
                 on a single structure group. Defaults to
-                `surfator.grouping.all_atoms_agree`, which places all mobile atoms
+                `surfator.agreement_groups.all_atoms_agree`, which places all mobile atoms
                 into a single agreement group.
             - structure_group_compatability (matrix-like): a square, symmetric
                 matrix indicating the compatability between the structure groups.
                 Symmetry is assumed. The side length is `max(site_groups)`.
-                Defaults to `None`, in which case all entries are assumed to be
-                `True`, that is, all structure groups are compatable.
+                Defaults to `None`, in which case we will attempt to call
+                `get_structure_group_compatability()` on `ref_sn` (presuming
+                it to be a subclass of `SiteNetwork`).
             - k_neighbor (int): An internal implementation parameter. How many
                 nearest neighbors in cell coordinate space to consider in real
                 space. If too small, actual nearest sites can be missed. Increasing
@@ -143,6 +146,11 @@ class StructureGroupAnalysis(object):
         structgrps = getattr(ref_sn, STRUCTURE_GROUP_ATTRIBUTE)
         assert np.min(structgrps) >= 0
         n_structgrps = np.max(structgrps) + 1
+        if structure_group_compatability is None:
+            try:
+                structure_group_compatability = ref_sn.get_structure_group_compatability()
+            except AttributeError:
+                raise ValueError("`structure_group_compatability` is `None`, but `ref_sn` doesn't implement `get_structure_group_compatability()`")
         # It's square
         assert structure_group_compatability.shape[0] == structure_group_compatability.shape[1] == n_structgrps, "`structure_group_compatability` is not square or has wrong dimensions"
         # It's symmetric
@@ -194,11 +202,13 @@ class StructureGroupAnalysis(object):
 
         # Buffers
         nearest_neighbors = np.empty(shape = n_mob_atoms, dtype = np.int)
-        can_assign_to = np.empty(shape = n_ref_atoms + n_mob_atoms, dtype = np.bool)
+        can_assign_to = np.empty(shape = n_ref_atoms, dtype = np.bool)
         structgrps_seen = np.empty(shape = n_structgrps, dtype = np.bool)
         assigned = np.ones(shape = n_mob_atoms, dtype = np.bool)
         site_weights = np.ones(shape = n_ref_atoms, dtype = np.float)
         site_available = np.ones(shape = n_ref_atoms, dtype = np.bool)
+        site_taken_by_atom = np.empty(shape = n_ref_atoms, dtype = np.int)
+        site_distance_to_atom = np.empty(shape = n_ref_atoms)
         neighbor_dist = np.empty(shape = k_neighbor, dtype = np.float)
 
         # -- Do structure group analysis --
@@ -225,6 +235,8 @@ class StructureGroupAnalysis(object):
             # Assume all assigned
             assigned.fill(True)
             site_available.fill(True)
+            site_taken_by_atom.fill(-1)
+            site_distance_to_atom.fill(np.inf)
 
             # - (2) - In order, assign the agreegrps
             for agreegrp_i, agreegrp_mask in enumerate(agreegrp_masks):
@@ -236,9 +248,8 @@ class StructureGroupAnalysis(object):
                     continue
 
                 site_weights.fill(1.0)
-                can_assign_to[:n_ref_atoms] = np.logical_and.reduce(ref_atoms_compatable_with[structgrps_seen])
-                can_assign_to[:n_ref_atoms] &= site_available
-                can_assign_to[n_ref_atoms:] = False # Can never assign to mobile atom
+                # Can only assign to those sites that are compatable with previous agreegrp's winning candidates
+                np.logical_and.reduce(ref_atoms_compatable_with[structgrps_seen], out = can_assign_to)
                 n_can_assign = np.sum(can_assign_to)
                 assert n_can_assign <= n_ref_atoms
                 if n_can_assign == 0:
@@ -246,11 +257,18 @@ class StructureGroupAnalysis(object):
 
                 to_assign = np.where(agreegrp_mask)[0]
 
-                for is_last_round in (False, True):
+                for round in range(N_ROUNDS):
                     # If the agreegrp is AGREE_GROUP_NONE, we don't actually want to enforce agreement
                     if agreegrp_order[agreegrp_i] == AGREE_GROUP_NONE:
-                        is_last_round = True
+                        # Start with assignment round, then displacement round.
+                        # All options will be left open without voting round.
+                        round = 1
 
+                    # At every round, enforce the no double occupancy requirement.
+                    # The voting round doesn't change occupations, so this changes nothing.
+                    can_assign_to &= site_available
+
+                    displaced_by_closer = []
                     for mob_i in to_assign:
                         kd_neighbor_dist, neighbor_idex = kdtree.query(frame[mob_i], k = k_neighbor, distance_upper_bound = cutoff_cell_coords, eps = eps)
                         # Remove non-existant neighbors
@@ -270,20 +288,42 @@ class StructureGroupAnalysis(object):
                             # Strict distance cutoff:
                             neighbor_dist[neighbor_dist > cutoff] = np.inf
                             nearest_neighbor = np.argmin(neighbor_dist)
-                            assert neighbor_dist[nearest_neighbor] < np.inf, "Had no site options for mobile atom %i in agreegrp %i. If k_neighbor is small, increase it?" % (mob_i, agreegrp_i)
-                            nearest_neighbors[mob_i] = neighbor_idex[nearest_neighbor]
+                            dist_to_nn = neighbor_dist[nearest_neighbor]
+                            assert dist_to_nn < np.inf, "Had no site options for mobile atom %i in agreegrp %i. If k_neighbor is small, increase it?" % (mob_i, agreegrp_i)
+                            assign_to_site = neighbor_idex[nearest_neighbor]
+                            nearest_neighbors[mob_i] = assign_to_site
+                            if round == 1:
+                                if dist_to_nn <= site_distance_to_atom[assign_to_site]:
+                                    # This is the closest atom to the site, assign
+                                    # Displace any previously assigned atom:
+                                    to_displace = site_taken_by_atom[assign_to_site]
+                                    if to_displace >= 0:
+                                        displaced_by_closer.append(to_displace)
+                                    site_distance_to_atom[assign_to_site] = dist_to_nn
+                                    site_taken_by_atom[assign_to_site] = mob_i
+                                else:
+                                    # This atom has already been displaced
+                                    displaced_by_closer.append(mob_i)
                         else:
                             # Can't assign this one
                             logger.warning("At frame %i couldn't assign mobile atom %i" % (frame_idex, mob_i))
                             nearest_neighbors[mob_i] = -1
                             assigned[mob_i] = False
+                        # These will get overwritten in the final round
                         site_assignments[frame_idex, mob_i] = nearest_neighbors[mob_i]
-                        if is_last_round:
+                        if round > 0:
+                            # Assignments during the voting round don't matter
+                            # for site availability
                             site_available[nearest_neighbors[mob_i]] = False
 
-                    if is_last_round:
+                    if round == 2: # Displaced assignment round - last round
                         break
-                    else:
+                    elif round == 1: # Assignment round
+                        # set to only assign displaced atoms
+                        to_assign = displaced_by_closer
+                        if len(displaced_by_closer) > 0:
+                            print("Frame %i displaced: %s" % (frame_idex, displaced_by_closer))
+                    elif round == 0: # Voting round
                         structgrp_assignments = structgrps[nearest_neighbors[agreegrp_mask & assigned]]
                         candidates, votes = np.unique(structgrp_assignments, return_counts = True)
                         winner_idex = np.argmax(votes)
@@ -318,12 +358,8 @@ class StructureGroupAnalysis(object):
                         # Assign only to structure groups compatable with the winner
                         # We do &= because constraints imposed by previous agreegrps
                         # take precidence.
-                        can_assign_to[:n_ref_atoms] &= ref_atoms_compatable_with[winner]
+                        can_assign_to &= ref_atoms_compatable_with[winner]
                         site_weights[ref_atoms_of_group[winner]] = 1 - self.winner_bias
-                        # Though technically we only need to reprocess those that
-                        # were incompatible with the winner, the neighborlist
-                        # already exists and reassigning them all is easier
-                        # and doesn't change the number of allocations being done.
                         # Keep track -- the winner is now "seen"
                         structgrps_seen[winner] = True
                         # Now we loop and reassign
