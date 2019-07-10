@@ -120,12 +120,32 @@ def agree_within_layers_and_deposits(layerfunc, surface_layer_index = 4, cutoff 
         pbcc = PBCCalculator(atoms.cell)
         pos = atoms.get_positions()
         tags = layerfunc(atoms, **kwargs)
-
-        adatom_mask = tags > surface_layer_index
+        layers = np.unique(tags)
+        newtags = tags.copy()
 
         # Determine the connected (as defined by cutoff) groups of adatoms
         # We take connected groups of adatoms, since they are within a distance
         # of influencing one another, as an agreement group
+        next_agreegrp = np.max(tags) + 1
+        layer_mask = np.empty(shape = len(tags), dtype = np.bool)
+        for layer in layers:
+            if layers <= surface_layer_index:
+                continue
+            np.equal(tags, layer, out = layer_mask)
+            conn_mat = pbcc.pairwise_distances(pos[layer_mask])
+            conn_mat = conn_mat < cutoff
+            n_groups, groups = connected_components(conn_mat, directed = False)
+            group_trans = np.bincount(groups)
+            deposits = group_trans >= min_deposit_size
+            n_deposits = np.sum(deposits)
+            group_trans[~deposits] = surfator.AGREE_GROUP_NONE
+            group_trans[deposits] = np.arange(n_deposits) + next_agreegrp
+            tags[layer_mask] = group_trans[groups]
+            next_agreegrp += n_deposits
+
+        adatom_mask = tags > surface_layer_index
+
+
         conn_mat = pbcc.pairwise_distances(pos[adatom_mask])
         conn_mat = conn_mat < cutoff
         n_groups, groups = connected_components(conn_mat, directed = False)
