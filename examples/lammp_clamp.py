@@ -177,7 +177,6 @@ def write_lammpstraj(path, cellstr, traj, atoms, coords = None, timesteps = None
 
 def main(traj_path,
          ref_path,
-         ref_structgrps_path,
          out_path,
          n = None,
          trajslice = None,
@@ -324,6 +323,6 @@ if __name__ == "__main__":
         print("lammp-clamp.py traj_path ref_path [\"json-kwargs-str\"|/path/to/kwargs.json] out_path")
         sys.exit(-1)
 
-    main(*argv[1:4],
+    main(*argv[1:3],
          out_path = argv[-1],
          **kwargs)
