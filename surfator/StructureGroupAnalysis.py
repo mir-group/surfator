@@ -240,8 +240,7 @@ class StructureGroupAnalysis(object):
             assert np.all(np.logical_or.reduce(agreegrp_masks, axis = 0)), "Not all mobile atoms were assigned to an agreegrp"
 
             # Seen no structure groups yet
-            agreegrp_winners = np.empty(shape = len(agreegrp_order), dtype = np.int)
-            agreegrp_winners.fill(-1)
+            agreegrp_winners = np.full(shape = len(agreegrp_order), fill_value = -1, dtype = np.int)
             # Assume all assigned
             assigned.fill(True)
             site_available.fill(True)
@@ -258,7 +257,7 @@ class StructureGroupAnalysis(object):
             )
             all_neighbor_idexs_shape = all_neighbor_idexs.shape
             all_neighbor_idexs.shape = (-1,)
-            all_neighbor_idexs = ref_site_ids[all_neighbor_idexs]
+            np.take(ref_site_ids, all_neighbor_idexs, out = all_neighbor_idexs)
             all_neighbor_idexs.shape = all_neighbor_idexs_shape
 
             # - (2) - In order, assign the agreegrps
