@@ -121,18 +121,16 @@ def agree_within_layers_and_deposits(layerfunc,
         - cutoff (float, distance units): The maximum distance between two adatoms
             for them to be considered part of the same deposit.
     """
-    nl = None
-    pbcc = None
     def func(atoms, **kwargs):
-        if nl is None:
-            nl = NeighborList(
-                cutoffs = np.full(shape = len(atoms), fill_value = cutoff)
+        if func.nl is None:
+            func.nl = NeighborList(
+                cutoffs = np.full(shape = len(atoms), fill_value = cutoff),
                 skin = skin,
                 self_interaction = False,
                 bothways = False,
                 primitive = NewPrimitiveNeighborList
             )
-            pbcc = PBCCalculator(atoms.cell)
+            func.pbcc = PBCCalculator(atoms.cell)
 
         tags = layerfunc(atoms, **kwargs)
         layers = np.unique(tags)
@@ -140,8 +138,8 @@ def agree_within_layers_and_deposits(layerfunc,
         newtags = np.empty_like(tags)
         newtags.fill(-1)
 
-        nl.update(atoms)
-        connmat = get_connectivity_matrix(nl)
+        func.nl.update(atoms)
+        connmat = get_connectivity_matrix(func.nl.nl, sparse = False)
 
         agreegrp_conns = []
         nexttag = 0
@@ -153,16 +151,19 @@ def agree_within_layers_and_deposits(layerfunc,
             n_groups_layer, group_tags = connected_components(layer_conmat, directed = False)
             group_tags += nexttag
             newtags[layer_mask] = group_tags
-            nexttag += n_groups_layer
             neighbor_groups = newtags[np.logical_or.reduce(layer_conrows, axis = 0)]
-            agreement_conns.append(neighbor_groups)
+            agreegrp_conns.append(neighbor_groups)
+            nexttag += n_groups_layer
 
         agreegrp_connmat = np.zeros(shape = (nexttag + 1, nexttag + 1), dtype = np.bool)
         for agreegrp, neighbors in enumerate(agreegrp_conns):
             agreegrp_connmat[agreegrp, neighbors] = True
         agreegrp_connmat = agreegrp_connmat[:-1, :-1]
-        assert np.all(agreegrp_connmat == agreegrp_connmat.T)
+
+        agreegrp_connmat |= agreegrp_connmat.T
 
         return newtags, np.arange(nexttag), agreegrp_connmat
+
+    func.nl = None
 
     return func

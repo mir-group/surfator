@@ -222,17 +222,17 @@ class StructureGroupAnalysis(object):
 
             # - (1) - Determine agreement groups
             agreeret = agreement_group_function(mobile_struct)
-            assert len(agreegrp_labels) = len(frame)
             if len(agreeret) == 3: # An ordering was given
-                agreegrp_labels, agreegrp_order, agreegrp_adjacency = agreegrp_labels
+                agreegrp_labels, agreegrp_order, agreegrp_adjacency = agreeret
             elif len(agreeret) == 2:
-                agreegrp_labels, agreegrp_adjacency = agreegrp_labels
+                agreegrp_labels, agreegrp_adjacency = agreeret
                 # Just uniq and sort
                 agreegrp_order = np.unique(agreegrp_labels)
                 agreegrp_order.sort()
             else:
                 raise ValueError("At frame %i got bad agreement group data %s" % (frame_i, agreeret))
             assert agreegrp_adjacency.shape[0] == agreegrp_adjacency.shape[1] == len(agreegrp_order)
+            assert len(agreegrp_labels) == len(frame)
             if return_assignments:
                 agreegrp_assignments[frame_idex] = agreegrp_labels
             agreegrp_masks = [agreegrp_labels == lbl for lbl in agreegrp_order]
