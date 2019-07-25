@@ -122,6 +122,7 @@ class StructureGroupAnalysis(object):
                 adjacency matrix (square, n_agreegrp x n_agreegrp, bool) indicating,
                 for each agreement group, which other agreement groups structure
                 groups it ought to take into consideration.
+                The positions in the ``Atoms`` are wrapped.
             structure_group_compatability (matrix-like): a square, symmetric
                 matrix indicating the compatability between the structure groups.
                 Symmetry is assumed. The side length is `max(site_groups)`.
@@ -216,7 +217,7 @@ class StructureGroupAnalysis(object):
 
         # -- Do structure group analysis --
         for frame_idex, frame in enumerate(tqdm(wrapped_traj)):
-            mobile_struct.positions[:] = traj[frame_idex, ref_sn.mobile_mask]
+            mobile_struct.positions[:] = frame[ref_sn.mobile_mask]
 
             # - (1) - Determine agreement groups
             agreeret = agreement_group_function(mobile_struct)
