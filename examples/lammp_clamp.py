@@ -111,7 +111,8 @@ def read_lammpstraj(path):
                 celldata = np.loadtxt(cellstr)
                 cellstr = "ITEM: BOX BOUNDS xy xz yz pp pp ff\n" + "".join(cellstr).strip()
                 cell, _ = construct_cell(celldata)
-                assert next(f).startswith("ITEM: ATOMS id type xu yu z")
+                atomhdr = next(f)
+                assert atomhdr.startswith("ITEM: ATOMS id type xu yu z") or atomhdr.startswith("ITEM: ATOMS id c_xyu[1] c_xyu[2] z c_cn")
                 frame = np.empty(shape = (n_atoms, 3))
                 if first_frame:
                     types = np.empty(shape = n_atoms, dtype = np.int)
@@ -323,6 +324,7 @@ if __name__ == "__main__":
         print("lammp-clamp.py traj_path ref_path [\"json-kwargs-str\"|/path/to/kwargs.json] out_path")
         sys.exit(-1)
 
-    main(*argv[1:3],
+    main(traj_path = argv[1],
+         ref_path = argv[2],
          out_path = argv[-1],
          **kwargs)
