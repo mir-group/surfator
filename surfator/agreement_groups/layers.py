@@ -3,6 +3,7 @@ import numpy as np
 import math
 
 import ase
+from ase.neighborlist import NeighborList, NewPrimitiveNeighborList, get_connectivity_matrix
 
 from scipy.sparse.csgraph import connected_components
 
@@ -61,6 +62,8 @@ def agree_within_layers(layer_heights, surface_normal = np.array([0, 0, 1]), cut
     assigns based on which layer "height" an atom is closest to along the surface
     normal vector.
 
+    Assumes unchanging number of atoms.
+
     Args:
         - layer_heights (ndarray): The "heights" (positions in normal coordinates)
             of the layers. Should be sorted, ascending.
@@ -83,17 +86,22 @@ def agree_within_layers(layer_heights, surface_normal = np.array([0, 0, 1]), cut
     half_dists *= 0.5
     assert len(half_dists) == len(layer_heights) + 1
 
+    surf_zs, tags, mask = None, None, None
+
     def func(atoms):
-        # We need to wrap coordinates so that with slanted surfaces we get the
-        # right heights along the normal
-        atoms.wrap()
-        surf_zs = np.dot(surface_normal, atoms.get_positions().T)
-        assert len(surf_zs) == len(atoms)
-        tags = np.full(shape = len(surf_zs), fill_value = surfator.AGREE_GROUP_UNASSIGNED, dtype = np.int)
+        nonlocal surf_zs, tags, mask
+        if surf_zs is None:
+            surf_zs = np.empty(shape = len(atoms))
+            tags = np.empty(shape = len(atoms), dtype = np.int)
+            mask = np.empty(shape = (2, len(atoms)), dtype = np.bool)
+        np.dot(surface_normal, atoms.positions.T, out = surf_zs)
+        tags.fill(surfator.AGREE_GROUP_UNASSIGNED)
 
         for layer_i, height in enumerate(layer_heights):
-            mask = (surf_zs >= height - half_dists[layer_i]) & (surf_zs <= height + half_dists[layer_i + 1])
-            tags[mask] = layer_i
+            np.greater_equal(surf_zs, height - half_dists[layer_i], out = mask[0])
+            np.less_equal(surf_zs, height + half_dists[layer_i + 1], out = mask[1])
+            mask[0] &= mask[1]
+            tags[mask[0]] = layer_i
 
         if np.min(tags) < 0:
             logger.warning("Couldn't assign atoms %s to layers" % np.where(tags < 0)[0])
@@ -103,39 +111,66 @@ def agree_within_layers(layer_heights, surface_normal = np.array([0, 0, 1]), cut
     return func
 
 
-def agree_within_layers_and_deposits(layerfunc, surface_layer_index = 4, cutoff = 3, min_deposit_size = 3):
-    """Define agreement groups based layers but allow surface deposits to be independent.
+def agree_within_components_of_groups(groupfunc,
+                                      cutoff = 3):
+    """Define agreement groups for each connected part each prior agreement group.
+
+    Wraps the agreement group function ``groupfunc``. (A typical ``groupfunc``
+    might divide the cell into layers.)
+
+    Each layer is split into its connected components (by atomic neighbors), and
+    each component is a new agreement group. Agreement groups are neigbors with
+    the agreement groups of any atoms that are neighbors to any of their atoms.
+
+    Atomic "neighborness" is determined by a distance under ``cutoff``.
+
+    Assumes unchanging number of atoms.
 
     Args:
-        - layerfunc (callable): An agreement group function assigning mobile
-            atoms to layers. Must return tags 0,1,2,... where increasing agreement
-            group number indicates increasing layer. Generally, this will be
-            `agree_within_layers()` with the correct parameters.
-        - surface_layer_index (int): The layer to consider the "surface"; all
-            mobile atoms at higher layers are considered adatoms.
-        - cutoff (float, distance units): The maximum distance between two adatoms
+        groupfunc (callable): An agreement group function assigning mobile
+            atoms to groups.
+        cutoff (float, distance units): The maximum distance between two adatoms
             for them to be considered part of the same deposit.
     """
+    pbcc, pairwise_dmat, connmat, newtags, layer_mask = None, None, None, None, None
     def func(atoms, **kwargs):
-        pbcc = PBCCalculator(atoms.cell)
-        pos = atoms.get_positions()
-        tags = layerfunc(atoms, **kwargs)
+        nonlocal pbcc, pairwise_dmat, connmat, newtags, layer_mask
+        # preallocate buffers
+        if pbcc is None:
+            pbcc = PBCCalculator(atoms.cell)
+            pairwise_dmat = np.empty(shape = (len(atoms), len(atoms)), dtype = atoms.positions.dtype)
+            connmat = np.empty(shape = (len(atoms), len(atoms)), dtype = np.bool)
+            newtags = np.empty(shape = len(atoms), dtype = np.int)
+            layer_mask = np.empty(shape = len(atoms), dtype = np.bool)
 
-        adatom_mask = tags > surface_layer_index
+        tags = groupfunc(atoms, **kwargs)
+        layers = np.unique(tags)
+        layers.sort()
+        newtags.fill(-1)
 
-        # Determine the connected (as defined by cutoff) groups of adatoms
-        # We take connected groups of adatoms, since they are within a distance
-        # of influencing one another, as an agreement group
-        conn_mat = pbcc.pairwise_distances(pos[adatom_mask])
-        conn_mat = conn_mat < cutoff
-        n_groups, groups = connected_components(conn_mat, directed = False)
-        logger.debug("Found %i adatoms in %i independent deposits" % (np.sum(adatom_mask), n_groups))
-        group_trans = np.bincount(groups)
-        deposits = group_trans >= min_deposit_size
-        group_trans[~deposits] = surfator.AGREE_GROUP_NONE
-        curr_max_agreegrp = np.max(tags)
-        group_trans[deposits] = np.arange(np.sum(deposits)) + curr_max_agreegrp
-        tags[adatom_mask] = group_trans[groups]
-        return tags
+        pbcc.pairwise_distances(atoms.positions, out = pairwise_dmat)
+        np.less_equal(pairwise_dmat, cutoff, out = connmat)
+
+        agreegrp_conns = []
+        nexttag = 0
+        for layer in layers:
+            np.equal(tags, layer, out = layer_mask)
+            layer_conrows = connmat[layer_mask]
+            layer_conmat = layer_conrows[:, layer_mask]
+            n_groups_layer, group_tags = connected_components(layer_conmat, directed = False)
+            group_tags += nexttag
+            newtags[layer_mask] = group_tags
+            neighbor_groups = newtags[np.logical_or.reduce(layer_conrows, axis = 0)]
+            agreegrp_conns.append(neighbor_groups)
+            nexttag += n_groups_layer
+
+        agreegrp_connmat = np.zeros(shape = (nexttag + 1, nexttag + 1), dtype = np.bool)
+        for agreegrp, neighbors in enumerate(agreegrp_conns):
+            agreegrp_connmat[agreegrp, neighbors] = True
+        agreegrp_connmat = agreegrp_connmat[:-1, :-1]
+
+        agreegrp_connmat |= agreegrp_connmat.T
+
+        return newtags, np.arange(nexttag), agreegrp_connmat
 
     return func

@@ -2,6 +2,7 @@
 import numpy as np
 
 import numbers
+import itertools
 
 from scipy.spatial import cKDTree
 
@@ -11,6 +12,7 @@ import ase.geometry
 from sitator import SiteNetwork, SiteTrajectory
 from sitator.util.progress import tqdm
 from sitator.util import PBCCalculator
+from sitator.visualization import plot_atoms, plot_points
 
 import surfator.agreement_groups
 
@@ -73,7 +75,8 @@ class StructureGroupAnalysis(object):
                  runoff_votes_weight = 0.5,
                  winner_bias = 0.5,
                  error_on_no_majority = True,
-                 eps_factor = 0.05):
+                 eps_factor = 0.1,
+                 kdtree_n_jobs = 1):
         assert 0 <= min_winner_percentage <= 1
         self.min_winner_percentage = min_winner_percentage
         assert 0 <= runoff_votes_weight <= 1
@@ -83,27 +86,31 @@ class StructureGroupAnalysis(object):
         self.winner_bias = winner_bias
         self.error_on_no_majority = error_on_no_majority
         self.eps_factor = eps_factor
-
+        self.kdtree_n_jobs = kdtree_n_jobs
 
     def run(self,
             ref_sn,
             traj,
             cutoff,
-            k_neighbor = 10,
+            k_neighbor = 6,
             agreement_group_function = surfator.agreement_groups.all_atoms_agree,
             structure_group_compatability = None,
             return_assignments = False):
         """
         Args:
-            - ref_sn (SiteNetwork): A `SiteNetwork` containing the sites to which
+            ref_sn (SiteNetwork): A `SiteNetwork` containing the sites to which
                 the mobile atoms will be assigned. Can contain multiple, possibly
                 exclusive, sets of sites called "structure groups." The site
                 attribute `STRUCTURE_GROUP_ATTRIBUTE` indicates, for each site,
                 which structure group it belongs to.
-            - traj (ndarray, n_frames x n_atoms x 3):
-            - cutoff (float, distance): The maximum distance between a mobile atom
+            traj (ndarray, n_frames x n_atoms x 3):
+            cutoff (float, distance): The maximum distance between a mobile atom
                 and the site it is assigned to.
-            - agreement_group_function (callable taking an Atoms): A function that,
+            k_neighbor (int): How many of the nearest sites to an atom to consider.
+                If 1, site weighting is effectively disabled. Should be set high
+                enough that, after eliminating incompatable sites, a site can still
+                be found.
+            agreement_group_function (callable taking an Atoms): A function that,
                 given an `Atoms` object containing the current positions of the
                 mobile atoms, returns labels indicating their membership in
                 "agreement groups." All atoms in an agreement group at some frame
@@ -111,18 +118,18 @@ class StructureGroupAnalysis(object):
                 on a single structure group. Defaults to
                 `surfator.agreement_groups.all_atoms_agree`, which places all mobile atoms
                 into a single agreement group.
-            - structure_group_compatability (matrix-like): a square, symmetric
+                This function also returns as its second value an agreement group
+                adjacency matrix (square, n_agreegrp x n_agreegrp, bool) indicating,
+                for each agreement group, which other agreement groups structure
+                groups it ought to take into consideration.
+                The positions in the ``Atoms`` are wrapped.
+            structure_group_compatability (matrix-like): a square, symmetric
                 matrix indicating the compatability between the structure groups.
                 Symmetry is assumed. The side length is `max(site_groups)`.
                 Defaults to `None`, in which case we will attempt to call
                 `get_structure_group_compatability()` on `ref_sn` (presuming
                 it to be a subclass of `SiteNetwork`).
-            - k_neighbor (int): An internal implementation parameter. How many
-                nearest neighbors in cell coordinate space to consider in real
-                space. If too small, actual nearest sites can be missed. Increasing
-                directly controls performance by determining the number of
-                KDTree queries and distance calculations needed. Defaults to 6.
-            - return_assignments (bool): Whether to return which agreement
+            return_assignments (bool): Whether to return which agreement
                 group and which structure group each mobile atom was assigned to
                 at each frame. Depending on `agreement_group_function`, the
                 labels for agreement groups might change from
@@ -158,7 +165,9 @@ class StructureGroupAnalysis(object):
         # All groups are compatable with themselves
         assert np.all(np.diagonal(structure_group_compatability)), "All structure groups must be marked as compatable with themselves."
         structgrp_incomap = ~structure_group_compatability
-        ref_atoms_compatable_with = np.zeros(shape = (n_structgrps, n_ref_atoms), dtype = np.bool)
+        # The unknown structgrp, -1, is compatable with everything
+        ref_atoms_compatable_with = np.zeros(shape = (n_structgrps + 1, n_ref_atoms), dtype = np.bool)
+        ref_atoms_compatable_with[-1] = True
         ref_atoms_of_group = np.zeros(shape = (n_structgrps, n_ref_atoms), dtype = np.bool)
         for structgrp in range(n_structgrps):
             compat_structgrps = np.where(structure_group_compatability[structgrp])[0]
@@ -166,27 +175,23 @@ class StructureGroupAnalysis(object):
             ref_atoms_of_group[structgrp] = structgrps == structgrp
 
         # -- Build KDTree --
-        # scipy's KDTree only supports cubic periodic boxes, so we do everything in crystal coordinates
         pbcc = PBCCalculator(ref_sn.structure.cell)
-        cell_coord_traj = traj.copy()
-        cell_coord_traj.shape = (-1, 3)
-        pbcc.to_cell_coords(cell_coord_traj)
-        cell_coord_traj.shape = traj.shape
+        wrapped_traj = traj.copy()
+        wrapped_traj.shape = (-1, 3)
+        pbcc.wrap_points(wrapped_traj)
+        wrapped_traj.shape = traj.shape
 
-        site_pos_cell_coords = ref_sn.centers.copy()
-        pbcc.to_cell_coords(site_pos_cell_coords)
-
-        # Different cell dimensions have different sizes. Since this is for the
-        # kdtree, we're gonna be generous and then be accurately conservative
-        # with the real-space distances.
-        cutoff_cell_coords = np.min(np.linalg.norm(ref_sn.structure.cell, axis = 1))
-        logger.debug("Magnitude of largest cell vector: %f" % cutoff_cell_coords)
-        cutoff_cell_coords = cutoff / cutoff_cell_coords
-        logger.debug("Cell coord. cutoff: %f" % cutoff_cell_coords)
+        # Build set of reference sites with periodic copies
+        images = list(itertools.product(range(-1, 2), repeat = 3))
+        image_000 = images.index((0, 0, 0))
+        ref_site_ids = np.tile(np.arange(ref_sn.n_sites), len(images))
+        all_centers = np.tile(ref_sn.centers, (len(images), 1, 1))
+        for image_i, image in enumerate(images):
+            all_centers[image_i] += np.dot(ref_sn.structure.cell.T, image)
+        all_centers.shape = (-1, 3)
 
         kdtree = cKDTree(
-            data = site_pos_cell_coords,
-            boxsize = 1 # Make it periodic
+            data = all_centers,
         )
 
         # Will be passed to the agreement group function
@@ -203,40 +208,57 @@ class StructureGroupAnalysis(object):
         # Buffers
         nearest_neighbors = np.empty(shape = n_mob_atoms, dtype = np.int)
         can_assign_to = np.empty(shape = n_ref_atoms, dtype = np.bool)
-        structgrps_seen = np.empty(shape = n_structgrps, dtype = np.bool)
         assigned = np.ones(shape = n_mob_atoms, dtype = np.bool)
         site_weights = np.ones(shape = n_ref_atoms, dtype = np.float)
         site_available = np.ones(shape = n_ref_atoms, dtype = np.bool)
         site_taken_by_atom = np.empty(shape = n_ref_atoms, dtype = np.int)
         site_distance_to_atom = np.empty(shape = n_ref_atoms)
-        neighbor_dist = np.empty(shape = k_neighbor, dtype = np.float)
+        neighbor_dist = np.empty(shape = k_neighbor)
 
         # -- Do structure group analysis --
-        for frame_idex, frame in enumerate(tqdm(cell_coord_traj)):
-            mobile_struct.positions[:] = traj[frame_idex, ref_sn.mobile_mask]
+        for frame_idex, frame in enumerate(tqdm(wrapped_traj)):
+            mobile_struct.positions[:] = frame[ref_sn.mobile_mask]
 
             # - (1) - Determine agreement groups
-            agreegrp_labels = agreement_group_function(mobile_struct)
-            if return_assignments:
-                agreegrp_assignments[frame_idex] = agreegrp_labels
-            if isinstance(agreegrp_labels, tuple): # An ordering was given
-                agreegrp_labels, agreegrp_order = agreegrp_labels
-            else:
+            agreeret = agreement_group_function(mobile_struct)
+            if len(agreeret) == 3: # An ordering was given
+                agreegrp_labels, agreegrp_order, agreegrp_adjacency = agreeret
+            elif len(agreeret) == 2:
+                agreegrp_labels, agreegrp_adjacency = agreeret
                 # Just uniq and sort
                 agreegrp_order = np.unique(agreegrp_labels)
                 agreegrp_order.sort()
+            else:
+                raise ValueError("At frame %i got bad agreement group data %s" % (frame_i, agreeret))
+            assert agreegrp_adjacency.shape[0] == agreegrp_adjacency.shape[1] == len(agreegrp_order)
+            assert len(agreegrp_labels) == len(frame)
+            if return_assignments:
+                agreegrp_assignments[frame_idex] = agreegrp_labels
             agreegrp_masks = [agreegrp_labels == lbl for lbl in agreegrp_order]
             logger.debug("At frame %i had %i agreegrps: %s of sizes %s" % (frame_idex, len(agreegrp_masks), agreegrp_order, [np.sum(m) for m in agreegrp_masks]))
             assert not np.any(np.logical_and.reduce(agreegrp_masks, axis = 0)), "Two or more agreement groups intersected at frame %i" % frame_idex
             assert np.all(np.logical_or.reduce(agreegrp_masks, axis = 0)), "Not all mobile atoms were assigned to an agreegrp"
 
             # Seen no structure groups yet
-            structgrps_seen.fill(False)
+            agreegrp_winners = np.full(shape = len(agreegrp_order), fill_value = -1, dtype = np.int)
             # Assume all assigned
             assigned.fill(True)
             site_available.fill(True)
             site_taken_by_atom.fill(-1)
             site_distance_to_atom.fill(np.inf)
+
+            # Distances don't change between rounds or agreegroups:
+            all_neighbor_dists, all_neighbor_idexs = kdtree.query(
+                mobile_struct.positions,
+                k = k_neighbor,
+                distance_upper_bound = cutoff,
+                eps = eps,
+                n_jobs = self.kdtree_n_jobs
+            )
+            all_neighbor_idexs_shape = all_neighbor_idexs.shape
+            all_neighbor_idexs.shape = (-1,)
+            np.take(ref_site_ids, all_neighbor_idexs, out = all_neighbor_idexs)
+            all_neighbor_idexs.shape = all_neighbor_idexs_shape
 
             # - (2) - In order, assign the agreegrps
             for agreegrp_i, agreegrp_mask in enumerate(agreegrp_masks):
@@ -248,12 +270,17 @@ class StructureGroupAnalysis(object):
                     continue
 
                 site_weights.fill(1.0)
-                # Can only assign to those sites that are compatable with previous agreegrp's winning candidates
-                np.logical_and.reduce(ref_atoms_compatable_with[structgrps_seen], out = can_assign_to)
+                # Can only assign to those sites that are compatable with
+                # adjacent agreegrp's winning candidates
+                neighbor_agreegrp_winners = agreegrp_winners[agreegrp_adjacency[agreegrp_i]]
+                # Can leave -1's because final element of ref_atoms_compatable_with is
+                # identity (all True) for that purpose
+                np.logical_and.reduce(ref_atoms_compatable_with[neighbor_agreegrp_winners], out = can_assign_to)
+                del neighbor_agreegrp_winners
                 n_can_assign = np.sum(can_assign_to)
                 assert n_can_assign <= n_ref_atoms
                 if n_can_assign == 0:
-                    raise StructureGroupCompatabilityError("At agreegrp %i, there are no structure groups compatible with the existing assignments, which are: %s" % (agreegrp_i, np.where(structgrps_seen)[0]))
+                    raise StructureGroupCompatabilityError("At agreegrp %i, there are no structure groups compatible with the existing assignments." % (agreegrp_i))
 
                 to_assign = np.where(agreegrp_mask)[0]
 
@@ -270,26 +297,21 @@ class StructureGroupAnalysis(object):
 
                     displaced_by_closer = []
                     for mob_i in to_assign:
-                        kd_neighbor_dist, neighbor_idex = kdtree.query(frame[mob_i], k = k_neighbor, distance_upper_bound = cutoff_cell_coords, eps = eps)
-                        # Remove non-existant neighbors
-                        neighbor_idex = neighbor_idex[np.isfinite(kd_neighbor_dist)]
-                        # Euclidean distances in cell space are rather meaningless -- recompute them in real space
-                        # We can do in_place since `[neighbor_idex]` is a list of indexes,
-                        # so indexing centers with it gives a copy anyway
-                        neighbor_dist = pbcc.distances(traj[frame_idex, mob_i], centers[neighbor_idex], in_place = True)
-                        if len(neighbor_idex) > 0:
-                            # Apply site weights
-                            # We do this first so we're only doing arithmetic with
-                            # real floats (no infs) to avoid NaNs, to avoid the performance
-                            # hit of NaN checking in `np.nanargmin`
-                            neighbor_dist *= site_weights[neighbor_idex]
-                            # Apply can_assign_to
-                            neighbor_dist[~can_assign_to[neighbor_idex]] = np.inf
-                            # Strict distance cutoff:
-                            neighbor_dist[neighbor_dist > cutoff] = np.inf
-                            nearest_neighbor = np.argmin(neighbor_dist)
-                            dist_to_nn = neighbor_dist[nearest_neighbor]
-                            assert dist_to_nn < np.inf, "Had no site options for mobile atom %i in agreegrp %i. If k_neighbor is small, increase it?" % (mob_i, agreegrp_i)
+                        neighbor_idex = all_neighbor_idexs[mob_i]
+                        neighbor_dist[:] = all_neighbor_dists[mob_i]
+                        # Apply site weights
+                        # We do this first so we're only doing arithmetic with
+                        # real floats (no infs) to avoid NaNs, to avoid the performance
+                        # hit of NaN checking in `np.nanargmin`
+                        neighbor_dist *= site_weights[neighbor_idex]
+                        # Apply can_assign_to
+                        neighbor_dist[~can_assign_to[neighbor_idex]] = np.inf
+                        # Strict distance cutoff:
+                        # Unneeded cause KDTree is strict
+                        #neighbor_dist[neighbor_dist > cutoff] = np.inf
+                        nearest_neighbor = np.argmin(neighbor_dist)
+                        dist_to_nn = neighbor_dist[nearest_neighbor]
+                        if dist_to_nn < np.inf:
                             assign_to_site = neighbor_idex[nearest_neighbor]
                             nearest_neighbors[mob_i] = assign_to_site
                             if round == 1:
@@ -309,6 +331,7 @@ class StructureGroupAnalysis(object):
                             logger.warning("At frame %i couldn't assign mobile atom %i" % (frame_idex, mob_i))
                             nearest_neighbors[mob_i] = -1
                             assigned[mob_i] = False
+
                         # These will get overwritten in the final round
                         site_assignments[frame_idex, mob_i] = nearest_neighbors[mob_i]
                         if round > 0:
@@ -361,7 +384,7 @@ class StructureGroupAnalysis(object):
                         can_assign_to &= ref_atoms_compatable_with[winner]
                         site_weights[ref_atoms_of_group[winner]] = 1 - self.winner_bias
                         # Keep track -- the winner is now "seen"
-                        structgrps_seen[winner] = True
+                        agreegrp_winners[agreegrp_i] = winner
                         # Now we loop and reassign
 
         self.average_majority = average_majority / average_majority_n
