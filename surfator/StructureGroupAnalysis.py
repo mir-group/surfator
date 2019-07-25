@@ -111,6 +111,10 @@ class StructureGroupAnalysis(object):
                 on a single structure group. Defaults to
                 `surfator.agreement_groups.all_atoms_agree`, which places all mobile atoms
                 into a single agreement group.
+                This function also returns as its second value an agreement group
+                adjacency matrix (square, n_agreegrp x n_agreegrp, bool) indicating,
+                for each agreement group, which other agreement groups structure
+                groups it ought to take into consideration.
             - structure_group_compatability (matrix-like): a square, symmetric
                 matrix indicating the compatability between the structure groups.
                 Symmetry is assumed. The side length is `max(site_groups)`.
@@ -158,7 +162,9 @@ class StructureGroupAnalysis(object):
         # All groups are compatable with themselves
         assert np.all(np.diagonal(structure_group_compatability)), "All structure groups must be marked as compatable with themselves."
         structgrp_incomap = ~structure_group_compatability
-        ref_atoms_compatable_with = np.zeros(shape = (n_structgrps, n_ref_atoms), dtype = np.bool)
+        # The unknown structgrp, -1, is compatable with everything
+        ref_atoms_compatable_with = np.zeros(shape = (n_structgrps + 1, n_ref_atoms), dtype = np.bool)
+        ref_atoms_compatable_with[-1] = True
         ref_atoms_of_group = np.zeros(shape = (n_structgrps, n_ref_atoms), dtype = np.bool)
         for structgrp in range(n_structgrps):
             compat_structgrps = np.where(structure_group_compatability[structgrp])[0]
@@ -203,7 +209,6 @@ class StructureGroupAnalysis(object):
         # Buffers
         nearest_neighbors = np.empty(shape = n_mob_atoms, dtype = np.int)
         can_assign_to = np.empty(shape = n_ref_atoms, dtype = np.bool)
-        structgrps_seen = np.empty(shape = n_structgrps, dtype = np.bool)
         assigned = np.ones(shape = n_mob_atoms, dtype = np.bool)
         site_weights = np.ones(shape = n_ref_atoms, dtype = np.float)
         site_available = np.ones(shape = n_ref_atoms, dtype = np.bool)
@@ -216,22 +221,28 @@ class StructureGroupAnalysis(object):
             mobile_struct.positions[:] = traj[frame_idex, ref_sn.mobile_mask]
 
             # - (1) - Determine agreement groups
-            agreegrp_labels = agreement_group_function(mobile_struct)
-            if return_assignments:
-                agreegrp_assignments[frame_idex] = agreegrp_labels
-            if isinstance(agreegrp_labels, tuple): # An ordering was given
-                agreegrp_labels, agreegrp_order = agreegrp_labels
-            else:
+            agreeret = agreement_group_function(mobile_struct)
+            assert len(agreegrp_labels) = len(frame)
+            if len(agreeret) == 3: # An ordering was given
+                agreegrp_labels, agreegrp_order, agreegrp_adjacency = agreegrp_labels
+            elif len(agreeret) == 2:
+                agreegrp_labels, agreegrp_adjacency = agreegrp_labels
                 # Just uniq and sort
                 agreegrp_order = np.unique(agreegrp_labels)
                 agreegrp_order.sort()
+            else:
+                raise ValueError("At frame %i got bad agreement group data %s" % (frame_i, agreeret))
+            assert agreegrp_adjacency.shape[0] == agreegrp_adjacency.shape[1] == len(agreegrp_order)
+            if return_assignments:
+                agreegrp_assignments[frame_idex] = agreegrp_labels
             agreegrp_masks = [agreegrp_labels == lbl for lbl in agreegrp_order]
             logger.debug("At frame %i had %i agreegrps: %s of sizes %s" % (frame_idex, len(agreegrp_masks), agreegrp_order, [np.sum(m) for m in agreegrp_masks]))
             assert not np.any(np.logical_and.reduce(agreegrp_masks, axis = 0)), "Two or more agreement groups intersected at frame %i" % frame_idex
             assert np.all(np.logical_or.reduce(agreegrp_masks, axis = 0)), "Not all mobile atoms were assigned to an agreegrp"
 
             # Seen no structure groups yet
-            structgrps_seen.fill(False)
+            agreegrp_winners = np.empty(shape = len(agreegrp_order), dtype = np.int)
+            agreegrp_winners.fill(-1)
             # Assume all assigned
             assigned.fill(True)
             site_available.fill(True)
@@ -248,12 +259,17 @@ class StructureGroupAnalysis(object):
                     continue
 
                 site_weights.fill(1.0)
-                # Can only assign to those sites that are compatable with previous agreegrp's winning candidates
-                np.logical_and.reduce(ref_atoms_compatable_with[structgrps_seen], out = can_assign_to)
+                # Can only assign to those sites that are compatable with
+                # adjacent agreegrp's winning candidates
+                neighbor_agreegrp_winners = agreegrp_winners[agreegrp_adjacency[agreegrp_i]]
+                # Can leave -1's because final element of ref_atoms_compatable_with is
+                # identity (all True) for that purpose
+                np.logical_and.reduce(ref_atoms_compatable_with[neighbor_agreegrp_winners], out = can_assign_to)
+                del neighbor_agreegrp_winners
                 n_can_assign = np.sum(can_assign_to)
                 assert n_can_assign <= n_ref_atoms
                 if n_can_assign == 0:
-                    raise StructureGroupCompatabilityError("At agreegrp %i, there are no structure groups compatible with the existing assignments, which are: %s" % (agreegrp_i, np.where(structgrps_seen)[0]))
+                    raise StructureGroupCompatabilityError("At agreegrp %i, there are no structure groups compatible with the existing assignments." % (agreegrp_i))
 
                 to_assign = np.where(agreegrp_mask)[0]
 
@@ -361,7 +377,7 @@ class StructureGroupAnalysis(object):
                         can_assign_to &= ref_atoms_compatable_with[winner]
                         site_weights[ref_atoms_of_group[winner]] = 1 - self.winner_bias
                         # Keep track -- the winner is now "seen"
-                        structgrps_seen[winner] = True
+                        agreegrp_winners[agreegrp_i] = winner
                         # Now we loop and reassign
 
         self.average_majority = average_majority / average_majority_n

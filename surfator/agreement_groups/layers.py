@@ -3,6 +3,7 @@ import numpy as np
 import math
 
 import ase
+from ase.neighborlist import NeighborList, NewPrimitiveNeighborList, get_connectivity_matrix
 
 from scipy.sparse.csgraph import connected_components
 
@@ -103,7 +104,11 @@ def agree_within_layers(layer_heights, surface_normal = np.array([0, 0, 1]), cut
     return func
 
 
-def agree_within_layers_and_deposits(layerfunc, surface_layer_index = 4, cutoff = 3, min_deposit_size = 3):
+def agree_within_layers_and_deposits(layerfunc,
+                                     surface_layer_index = 4,
+                                     cutoff = 3,
+                                     min_deposit_size = 3,
+                                     skin = 0.1):
     """Define agreement groups based layers but allow surface deposits to be independent.
 
     Args:
@@ -116,46 +121,48 @@ def agree_within_layers_and_deposits(layerfunc, surface_layer_index = 4, cutoff 
         - cutoff (float, distance units): The maximum distance between two adatoms
             for them to be considered part of the same deposit.
     """
+    nl = None
+    pbcc = None
     def func(atoms, **kwargs):
-        pbcc = PBCCalculator(atoms.cell)
-        pos = atoms.get_positions()
+        if nl is None:
+            nl = NeighborList(
+                cutoffs = np.full(shape = len(atoms), fill_value = cutoff)
+                skin = skin,
+                self_interaction = False,
+                bothways = False,
+                primitive = NewPrimitiveNeighborList
+            )
+            pbcc = PBCCalculator(atoms.cell)
+
         tags = layerfunc(atoms, **kwargs)
         layers = np.unique(tags)
-        newtags = tags.copy()
+        layers.sort()
+        newtags = np.empty_like(tags)
+        newtags.fill(-1)
 
-        # Determine the connected (as defined by cutoff) groups of adatoms
-        # We take connected groups of adatoms, since they are within a distance
-        # of influencing one another, as an agreement group
-        next_agreegrp = np.max(tags) + 1
+        nl.update(atoms)
+        connmat = get_connectivity_matrix(nl)
+
+        agreegrp_conns = []
+        nexttag = 0
         layer_mask = np.empty(shape = len(tags), dtype = np.bool)
         for layer in layers:
-            if layers <= surface_layer_index:
-                continue
             np.equal(tags, layer, out = layer_mask)
-            conn_mat = pbcc.pairwise_distances(pos[layer_mask])
-            conn_mat = conn_mat < cutoff
-            n_groups, groups = connected_components(conn_mat, directed = False)
-            group_trans = np.bincount(groups)
-            deposits = group_trans >= min_deposit_size
-            n_deposits = np.sum(deposits)
-            group_trans[~deposits] = surfator.AGREE_GROUP_NONE
-            group_trans[deposits] = np.arange(n_deposits) + next_agreegrp
-            tags[layer_mask] = group_trans[groups]
-            next_agreegrp += n_deposits
+            layer_conrows = connmat[layer_mask]
+            layer_conmat = layer_conrows[:, layer_mask]
+            n_groups_layer, group_tags = connected_components(layer_conmat, directed = False)
+            group_tags += nexttag
+            newtags[layer_mask] = group_tags
+            nexttag += n_groups_layer
+            neighbor_groups = newtags[np.logical_or.reduce(layer_conrows, axis = 0)]
+            agreement_conns.append(neighbor_groups)
 
-        adatom_mask = tags > surface_layer_index
+        agreegrp_connmat = np.zeros(shape = (nexttag + 1, nexttag + 1), dtype = np.bool)
+        for agreegrp, neighbors in enumerate(agreegrp_conns):
+            agreegrp_connmat[agreegrp, neighbors] = True
+        agreegrp_connmat = agreegrp_connmat[:-1, :-1]
+        assert np.all(agreegrp_connmat == agreegrp_connmat.T)
 
-
-        conn_mat = pbcc.pairwise_distances(pos[adatom_mask])
-        conn_mat = conn_mat < cutoff
-        n_groups, groups = connected_components(conn_mat, directed = False)
-        logger.debug("Found %i adatoms in %i independent deposits" % (np.sum(adatom_mask), n_groups))
-        group_trans = np.bincount(groups)
-        deposits = group_trans >= min_deposit_size
-        group_trans[~deposits] = surfator.AGREE_GROUP_NONE
-        curr_max_agreegrp = np.max(tags)
-        group_trans[deposits] = np.arange(np.sum(deposits)) + curr_max_agreegrp
-        tags[adatom_mask] = group_trans[groups]
-        return tags
+        return newtags, np.arange(nexttag), agreegrp_connmat
 
     return func
