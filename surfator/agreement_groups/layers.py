@@ -104,35 +104,40 @@ def agree_within_layers(layer_heights, surface_normal = np.array([0, 0, 1]), cut
     return func
 
 
-def agree_within_layers_and_deposits(layerfunc,
-                                     surface_layer_index = 4,
-                                     cutoff = 3,
-                                     min_deposit_size = 3,
-                                     skin = 0.3):
-    """Define agreement groups based layers but allow surface deposits to be independent.
+def agree_within_components_of_groups(groupfunc,
+                                      cutoff = 3):
+    """Define agreement groups for each connected part each prior agreement group.
+
+    Wraps the agreement group function ``groupfunc``. (A typical ``groupfunc``
+    might divide the cell into layers.)
+
+    Each layer is split into its connected components (by atomic neighbors), and
+    each component is a new agreement group. Agreement groups are neigbors with
+    the agreement groups of any atoms that are neighbors to any of their atoms.
+
+    Atomic "neighborness" is determined by a distance under ``cutoff``.
 
     Args:
-        - layerfunc (callable): An agreement group function assigning mobile
-            atoms to layers. Must return tags 0,1,2,... where increasing agreement
-            group number indicates increasing layer. Generally, this will be
-            `agree_within_layers()` with the correct parameters.
-        - surface_layer_index (int): The layer to consider the "surface"; all
-            mobile atoms at higher layers are considered adatoms.
-        - cutoff (float, distance units): The maximum distance between two adatoms
+        groupfunc (callable): An agreement group function assigning mobile
+            atoms to groups.
+        cutoff (float, distance units): The maximum distance between two adatoms
             for them to be considered part of the same deposit.
     """
     def func(atoms, **kwargs):
         if func.pbcc is None:
             func.pbcc = PBCCalculator(atoms.cell)
+            func.pairwise_dmat = np.empty(shape = (len(atoms), len(atoms)), dtype = atoms.positions.dtype)
+            func.connmat = np.empty(shape = (len(atoms), len(atoms)), dtype = np.bool)
 
-        tags = layerfunc(atoms, **kwargs)
+        tags = groupfunc(atoms, **kwargs)
         layers = np.unique(tags)
         layers.sort()
         newtags = np.empty_like(tags)
         newtags.fill(-1)
 
-        connmat = func.pbcc.pairwise_distances(atoms.positions)
-        connmat = connmat <= 1.5 * cutoff
+        func.pbcc.pairwise_distances(atoms.positions, out = func.pairwise_dmat)
+        np.less_equal(func.pairwise_dmat, cutoff, out = func.connmat)
+        connmat = func.connmat
 
         agreegrp_conns = []
         nexttag = 0
