@@ -108,7 +108,7 @@ def agree_within_layers_and_deposits(layerfunc,
                                      surface_layer_index = 4,
                                      cutoff = 3,
                                      min_deposit_size = 3,
-                                     skin = 0.1):
+                                     skin = 0.3):
     """Define agreement groups based layers but allow surface deposits to be independent.
 
     Args:
@@ -122,14 +122,7 @@ def agree_within_layers_and_deposits(layerfunc,
             for them to be considered part of the same deposit.
     """
     def func(atoms, **kwargs):
-        if func.nl is None:
-            func.nl = NeighborList(
-                cutoffs = np.full(shape = len(atoms), fill_value = cutoff),
-                skin = skin,
-                self_interaction = False,
-                bothways = False,
-                primitive = NewPrimitiveNeighborList
-            )
+        if func.pbcc is None:
             func.pbcc = PBCCalculator(atoms.cell)
 
         tags = layerfunc(atoms, **kwargs)
@@ -138,8 +131,8 @@ def agree_within_layers_and_deposits(layerfunc,
         newtags = np.empty_like(tags)
         newtags.fill(-1)
 
-        func.nl.update(atoms)
-        connmat = get_connectivity_matrix(func.nl.nl, sparse = False)
+        connmat = func.pbcc.pairwise_distances(atoms.positions)
+        connmat = connmat <= 1.5 * cutoff
 
         agreegrp_conns = []
         nexttag = 0
@@ -164,6 +157,6 @@ def agree_within_layers_and_deposits(layerfunc,
 
         return newtags, np.arange(nexttag), agreegrp_connmat
 
-    func.nl = None
+    func.pbcc = None
 
     return func
