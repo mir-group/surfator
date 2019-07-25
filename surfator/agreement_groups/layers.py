@@ -62,6 +62,8 @@ def agree_within_layers(layer_heights, surface_normal = np.array([0, 0, 1]), cut
     assigns based on which layer "height" an atom is closest to along the surface
     normal vector.
 
+    Assumes unchanging number of atoms.
+
     Args:
         - layer_heights (ndarray): The "heights" (positions in normal coordinates)
             of the layers. Should be sorted, ascending.
@@ -84,17 +86,22 @@ def agree_within_layers(layer_heights, surface_normal = np.array([0, 0, 1]), cut
     half_dists *= 0.5
     assert len(half_dists) == len(layer_heights) + 1
 
+    surf_zs, tags, mask = None, None, None
+
     def func(atoms):
-        # We need to wrap coordinates so that with slanted surfaces we get the
-        # right heights along the normal
-        atoms.wrap()
-        surf_zs = np.dot(surface_normal, atoms.get_positions().T)
-        assert len(surf_zs) == len(atoms)
-        tags = np.full(shape = len(surf_zs), fill_value = surfator.AGREE_GROUP_UNASSIGNED, dtype = np.int)
+        nonlocal surf_zs, tags, mask
+        if surf_zs is None:
+            surf_zs = np.empty(shape = len(atoms))
+            tags = np.empty(shape = len(atoms), dtype = np.int)
+            mask = np.empty(shape = (2, len(atoms)), dtype = np.bool)
+        np.dot(surface_normal, atoms.positions.T, out = surf_zs)
+        tags.fill(surfator.AGREE_GROUP_UNASSIGNED)
 
         for layer_i, height in enumerate(layer_heights):
-            mask = (surf_zs >= height - half_dists[layer_i]) & (surf_zs <= height + half_dists[layer_i + 1])
-            tags[mask] = layer_i
+            np.greater_equal(surf_zs, height - half_dists[layer_i], out = mask[0])
+            np.less_equal(surf_zs, height + half_dists[layer_i + 1], out = mask[1])
+            mask[0] &= mask[1]
+            tags[mask[0]] = layer_i
 
         if np.min(tags) < 0:
             logger.warning("Couldn't assign atoms %s to layers" % np.where(tags < 0)[0])
@@ -117,31 +124,35 @@ def agree_within_components_of_groups(groupfunc,
 
     Atomic "neighborness" is determined by a distance under ``cutoff``.
 
+    Assumes unchanging number of atoms.
+
     Args:
         groupfunc (callable): An agreement group function assigning mobile
             atoms to groups.
         cutoff (float, distance units): The maximum distance between two adatoms
             for them to be considered part of the same deposit.
     """
+    pbcc, pairwise_dmat, connmat, newtags, layer_mask = None, None, None, None, None
     def func(atoms, **kwargs):
-        if func.pbcc is None:
-            func.pbcc = PBCCalculator(atoms.cell)
-            func.pairwise_dmat = np.empty(shape = (len(atoms), len(atoms)), dtype = atoms.positions.dtype)
-            func.connmat = np.empty(shape = (len(atoms), len(atoms)), dtype = np.bool)
+        nonlocal pbcc, pairwise_dmat, connmat, newtags, layer_mask
+        # preallocate buffers
+        if pbcc is None:
+            pbcc = PBCCalculator(atoms.cell)
+            pairwise_dmat = np.empty(shape = (len(atoms), len(atoms)), dtype = atoms.positions.dtype)
+            connmat = np.empty(shape = (len(atoms), len(atoms)), dtype = np.bool)
+            newtags = np.empty(shape = len(atoms), dtype = np.int)
+            layer_mask = np.empty(shape = len(atoms), dtype = np.bool)
 
         tags = groupfunc(atoms, **kwargs)
         layers = np.unique(tags)
         layers.sort()
-        newtags = np.empty_like(tags)
         newtags.fill(-1)
 
-        func.pbcc.pairwise_distances(atoms.positions, out = func.pairwise_dmat)
-        np.less_equal(func.pairwise_dmat, cutoff, out = func.connmat)
-        connmat = func.connmat
+        pbcc.pairwise_distances(atoms.positions, out = pairwise_dmat)
+        np.less_equal(pairwise_dmat, cutoff, out = connmat)
 
         agreegrp_conns = []
         nexttag = 0
-        layer_mask = np.empty(shape = len(tags), dtype = np.bool)
         for layer in layers:
             np.equal(tags, layer, out = layer_mask)
             layer_conrows = connmat[layer_mask]
@@ -161,7 +172,5 @@ def agree_within_components_of_groups(groupfunc,
         agreegrp_connmat |= agreegrp_connmat.T
 
         return newtags, np.arange(nexttag), agreegrp_connmat
-
-    func.pbcc = None
 
     return func
