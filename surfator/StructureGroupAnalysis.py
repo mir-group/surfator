@@ -257,7 +257,10 @@ class StructureGroupAnalysis(object):
             )
             all_neighbor_idexs_shape = all_neighbor_idexs.shape
             all_neighbor_idexs.shape = (-1,)
-            np.take(ref_site_ids, all_neighbor_idexs, out = all_neighbor_idexs)
+            # We use clip mode so as not to error on nonexistant neighbors.
+            # Those will be filtered out by the infs in the distances, so
+            # it doesn't matter what value they take.
+            np.take(ref_site_ids, all_neighbor_idexs, out = all_neighbor_idexs, mode = 'clip')
             all_neighbor_idexs.shape = all_neighbor_idexs_shape
 
             # - (2) - In order, assign the agreegrps
