@@ -360,7 +360,7 @@ class StructureGroupAnalysis(object):
                         # set to only assign displaced atoms
                         to_assign = displaced_by_closer
                         if len(displaced_by_closer) > 0:
-                            print("Frame %i displaced: %s" % (frame_idex, displaced_by_closer))
+                            logger.debug("Frame %i displaced: %s" % (frame_idex, displaced_by_closer))
                     elif round == 0: # Voting round
                         structgrp_assignments = structgrps[nearest_neighbors[agreegrp_mask & assigned]]
                         candidates, votes = np.unique(structgrp_assignments, return_counts = True)
