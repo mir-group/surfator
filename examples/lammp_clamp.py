@@ -112,16 +112,38 @@ def read_lammpstraj(path):
                 cellstr = "ITEM: BOX BOUNDS xy xz yz pp pp ff\n" + "".join(cellstr).strip()
                 cell, _ = construct_cell(celldata)
                 atomhdr = next(f)
-                assert atomhdr.startswith("ITEM: ATOMS id type xu yu z") or atomhdr.startswith("ITEM: ATOMS id c_xyu[1] c_xyu[2] z c_cn")
+                # FIXME deal with headers...
+                #assert atomhdr.startswith("ITEM: ATOMS id type xu yu z") or atomhdr.startswith("ITEM: ATOMS id c_xyu[1] c_xyu[2] z")
+                assert atomhdr.startswith("ITEM: ATOMS id") or atomhdr.startswith("ITEM: ATOMS id")
+                atomhdr = atomhdr.split()[2:]
+                ididx = 0
+                try:
+                    typeidx = atomhdr.index('type')
+                except ValueError:
+                    typeidx = None
+                xidx = None
+                for x in ("x", "xu", "c_xyu[1]"):
+                    try:
+                        xidx = atomhdr.index(x)
+                        break
+                    except ValueError:
+                        continue
+                if xidx is None:
+                    raise ValueError("no x!")
+                assert atomhdr[xidx + 1] == 'y' or atomhdr[xidx + 1] == 'yu' or atomhdr[xidx + 1] == 'c_xyu[2]'
+                assert atomhdr[xidx + 2] == 'z' or atomhdr[xidx + 2] == 'zu' or atomhdr[xidx + 2] == 'c_xyu[3]'
                 frame = np.empty(shape = (n_atoms, 3))
                 if first_frame:
                     types = np.empty(shape = n_atoms, dtype = np.int)
                     ids = np.empty(shape = n_atoms, dtype = np.int)
                 for atom_i in range(n_atoms):
                     lsplit = next(f).split()
-                    frame[atom_i] = lsplit[2:5]
-                    types[atom_i] = lsplit[1]
-                    ids[atom_i] = lsplit[0]
+                    frame[atom_i] = lsplit[xidx:xidx + 3]
+                    if typeidx is not None:
+                        types[atom_i] = lsplit[typeidx]
+                    else:
+                        types[atom_i] = 0
+                    ids[atom_i] = lsplit[ididx]
                 frames.append(frame)
                 processed_full_frame = True
                 first_frame = False
