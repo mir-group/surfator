@@ -4,7 +4,9 @@ import numpy as np
 import numbers
 import itertools
 
-from scipy.spatial import cKDTree
+#from scipy.spatial import cKDTree
+from MDAnalysis.lib.nsgrid import FastNS
+from MDAnalysis.lib.mdamath import triclinic_box
 
 import ase
 import ase.geometry
@@ -175,23 +177,36 @@ class StructureGroupAnalysis(object):
             ref_atoms_of_group[structgrp] = structgrps == structgrp
 
         # -- Build KDTree --
-        pbcc = PBCCalculator(ref_sn.structure.cell)
+        cell = ref_sn.structure.cell
+        pbcc = PBCCalculator(cell)
         wrapped_traj = traj.copy()
         wrapped_traj.shape = (-1, 3)
         pbcc.wrap_points(wrapped_traj)
         wrapped_traj.shape = traj.shape
 
         # Build set of reference sites with periodic copies
-        images = list(itertools.product(range(-1, 2), repeat = 3))
-        image_000 = images.index((0, 0, 0))
-        ref_site_ids = np.tile(np.arange(ref_sn.n_sites), len(images))
-        all_centers = np.tile(ref_sn.centers, (len(images), 1, 1))
-        for image_i, image in enumerate(images):
-            all_centers[image_i] += np.dot(ref_sn.structure.cell.T, image)
-        all_centers.shape = (-1, 3)
+        # images = list(itertools.product(range(-1, 2), repeat = 3))
+        # image_000 = images.index((0, 0, 0))
+        # ref_site_ids = np.tile(np.arange(ref_sn.n_sites), len(images))
+        # all_centers = np.tile(ref_sn.centers, (len(images), 1, 1))
+        # for image_i, image in enumerate(images):
+        #     all_centers[image_i] += np.dot(ref_sn.structure.cell.T, image)
+        # all_centers.shape = (-1, 3)
 
-        kdtree = cKDTree(
-            data = all_centers,
+        # kdtree = cKDTree(
+        #     data = all_centers,
+        # )
+
+        our_triclinic_cell = triclinic_box(
+            cell[0],
+            cell[1],
+            cell[2]
+        )
+        ref_fastns = FastNS(
+            cutoff = cutoff,
+            coords = ref_sn.centers,
+            box = our_triclinic_cell,
+            pbc = True
         )
 
         # Will be passed to the agreement group function
@@ -213,7 +228,6 @@ class StructureGroupAnalysis(object):
         site_available = np.ones(shape = n_ref_atoms, dtype = np.bool)
         site_taken_by_atom = np.empty(shape = n_ref_atoms, dtype = np.int)
         site_distance_to_atom = np.empty(shape = n_ref_atoms)
-        neighbor_dist = np.empty(shape = k_neighbor)
 
         # -- Do structure group analysis --
         for frame_idex, frame in enumerate(tqdm(wrapped_traj)):
@@ -248,20 +262,10 @@ class StructureGroupAnalysis(object):
             site_distance_to_atom.fill(np.inf)
 
             # Distances don't change between rounds or agreegroups:
-            all_neighbor_dists, all_neighbor_idexs = kdtree.query(
-                mobile_struct.positions,
-                k = k_neighbor,
-                distance_upper_bound = cutoff,
-                eps = eps,
-                n_jobs = self.kdtree_n_jobs
-            )
-            all_neighbor_idexs_shape = all_neighbor_idexs.shape
-            all_neighbor_idexs.shape = (-1,)
-            # We use clip mode so as not to error on nonexistant neighbors.
-            # Those will be filtered out by the infs in the distances, so
-            # it doesn't matter what value they take.
-            np.take(ref_site_ids, all_neighbor_idexs, out = all_neighbor_idexs, mode = 'clip')
-            all_neighbor_idexs.shape = all_neighbor_idexs_shape
+            neighbor_res = ref_fastns.search(mobile_struct.positions)
+            all_neighbor_dists = neighbor_res.get_distances()
+            all_neighbor_dists_copy = all_neighbor_dists.copy()
+            all_neighbor_idexs = neighbor_res.get_indices()
 
             # - (2) - In order, assign the agreegrps
             for agreegrp_i, agreegrp_mask in enumerate(agreegrp_masks):
@@ -298,22 +302,30 @@ class StructureGroupAnalysis(object):
                     # The voting round doesn't change occupations, so this changes nothing.
                     can_assign_to &= site_available
 
+                    # Restore unweighted distances each round:
+                    all_neighbor_dists[:] = all_neighbor_dists_copy
+
                     displaced_by_closer = []
                     for mob_i in to_assign:
                         neighbor_idex = all_neighbor_idexs[mob_i]
-                        neighbor_dist[:] = all_neighbor_dists[mob_i]
-                        # Apply site weights
-                        # We do this first so we're only doing arithmetic with
-                        # real floats (no infs) to avoid NaNs, to avoid the performance
-                        # hit of NaN checking in `np.nanargmin`
-                        neighbor_dist *= site_weights[neighbor_idex]
-                        # Apply can_assign_to
-                        neighbor_dist[~can_assign_to[neighbor_idex]] = np.inf
-                        # Strict distance cutoff:
-                        # Unneeded cause KDTree is strict
-                        #neighbor_dist[neighbor_dist > cutoff] = np.inf
-                        nearest_neighbor = np.argmin(neighbor_dist)
-                        dist_to_nn = neighbor_dist[nearest_neighbor]
+                        neighbor_dist = all_neighbor_dists[mob_i]
+                        if len(neighbor_idex) == 0:
+                            dist_to_nn = np.inf
+                        else:
+                            # We can mutate the distances because each mobile
+                            # atom only gets touched once each frame
+                            # Apply site weights
+                            # We do this first so we're only doing arithmetic with
+                            # real floats (no infs) to avoid NaNs, to avoid the performance
+                            # hit of NaN checking in `np.nanargmin`
+                            neighbor_dist *= site_weights[neighbor_idex]
+                            # Apply can_assign_to
+                            neighbor_dist[~can_assign_to[neighbor_idex]] = np.inf
+                            # Strict distance cutoff:
+                            # Unneeded cause KDTree is strict
+                            # neighbor_dist[neighbor_dist > cutoff] = np.inf
+                            nearest_neighbor = np.argmin(neighbor_dist)
+                            dist_to_nn = neighbor_dist[nearest_neighbor]
                         if dist_to_nn < np.inf:
                             assign_to_site = neighbor_idex[nearest_neighbor]
                             nearest_neighbors[mob_i] = assign_to_site
