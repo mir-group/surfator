@@ -1,7 +1,8 @@
 
 import numpy as np
 
-from ase.neighborlist import NewPrimitiveNeighborList
+from MDAnalysis.lib.nsgrid import FastNS
+from MDAnalysis.lib.mdamath import triclinic_box
 
 from sitator.util.progress import tqdm
 
@@ -26,23 +27,22 @@ def calculate_coord_numbers(traj, atoms, cutoff, skin = 0, mask = None):
 
     out = np.full(shape = (len(traj), np.sum(mask)), fill_value = -1, dtype = np.int)
 
-    nl = NewPrimitiveNeighborList(cutoffs = np.full(n_atoms, cutoff * 0.5),
-                                  skin = skin,
-                                  self_interaction = False,
-                                  bothways = True)
-
-    nl.build(pbc = atoms.pbc,
-             cell = atoms.cell,
-             positions = atoms.get_positions())
+    our_triclinic_cell = triclinic_box(
+        atoms.cell[0],
+        atoms.cell[1],
+        atoms.cell[2],
+    )
 
     for f_idex, frame in enumerate(tqdm(traj)):
-        nl.update(pbc = atoms.pbc,
-                  cell = atoms.cell,
-                  positions = frame)
+        neighbors = FastNS(
+            cutoff = cutoff,
+            coords = frame,
+            box = our_triclinic_cell,
+            pbc = True
+        ).self_search().get_indices()
 
         for out_i, atom_i in enumerate(mask_idexes):
-            neighbor_idex, neighbor_offset = nl.get_neighbors(atom_i)
-            out[f_idex, out_i] = len(neighbor_idex)
+            out[f_idex, out_i] = len(neighbors[atom_i])
 
     assert np.min(out) >= 0
 
