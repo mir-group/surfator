@@ -224,8 +224,12 @@ def main(traj_path,
     sitator_log = logging.getLogger("sitator")
     sitator_log.setLevel(logging.INFO)
     sitator_log.addHandler(fh)
+    logger = logging.getLogger("lammp_clamp")
+    logger.setLevel(logging.INFO)
+    logger.addHandler(fh)
+    logger.addHandler(logging.StreamHandler(sys.stderr))
 
-    print("Loading trajectory and reference structure...")
+    logger.info("Loading trajectory and reference structure...")
     traj, timesteps, atoms, cellstr = read_lammpstraj(traj_path)
 
     surface_normal, ref_positions, layers, ref_site_types = read_refstruct(ref_path)
@@ -243,16 +247,15 @@ def main(traj_path,
         traj = traj[trajslice]
         timesteps = timesteps[trajslice]
 
-    print("Cell:")
-    print(atoms.cell)
+    logger.info("Cell: \n%s" % atoms.cell)
 
-    print("Determining layers...")
+    logger.info("Determining layers...")
     assert n is not None
     heights_kmeans_stride = max(len(traj) // 300, 1)  # Why not? 300 frames of heights sounds reasonable
     layers = get_layer_heights_kmeans(traj[::heights_kmeans_stride], atoms.cell, n, surface_normal = surface_normal)
-    print("Layer heights: %s" % layers)
+    logger.info("Layer heights: %s" % layers)
 
-    print("Assigning to reference sites...")
+    logger.info("Assigning to reference sites...")
     if assign_cutoff is None:
         assign_cutoff = cutoff
 
@@ -288,29 +291,29 @@ def main(traj_path,
     )
     np.save(os.path.join(out_path, "agreegrp-assignments.npy"), agreegrp_assign)
     np.save(os.path.join(out_path, "structgrp-assignments.npy"), structgrp_assign)
-    print("    Percent unassigned: %.2f%%" % (100 * st.percent_unassigned))
-    print("    Average majority: %i%%; minimum majority %i%%" % (100 * sga.average_majority, 100 * sga.minimum_majority))
+    logger.info("    Percent unassigned: %.2f%%" % (100 * st.percent_unassigned))
+    logger.info("    Average majority: %i%%; minimum majority %i%%" % (100 * sga.average_majority, 100 * sga.minimum_majority))
     st.compute_site_occupancies()
     occs = st.site_network.occupancies
-    print("    Min occupancy: %.2f; avg. occupancy: %.2f; max occupancy: %.2f" % (np.min(occs), np.mean(occs), np.max(occs)))
+    logger.info("    Min occupancy: %.2f; avg. occupancy: %.2f; max occupancy: %.2f" % (np.min(occs), np.mean(occs), np.max(occs)))
     n_multiple_assign, _ = st.check_multiple_occupancy(max_mobile_per_site = 2)
-    print("    n multiple assignment: %i" % n_multiple_assign)
+    logger.info("    n multiple assignment: %i" % n_multiple_assign)
 
-    print("Removing short jumps...")
+    logger.info("Removing short jumps...")
     sst = SmoothSiteTrajectory(
         window_threshold_factor = 3/2,
         set_unassigned_under_threshold = False # Maintain short transitions, only eliminate failed attempts
     )
     st = sst.run(st, threshold = 2)
-    print("    Percent unassigned: %.2f%%" % (100 * st.percent_unassigned))
+    logger.info("    Percent unassigned: %.2f%%" % (100 * st.percent_unassigned))
     n_multiple_assign, _ = st.check_multiple_occupancy(max_mobile_per_site = 2)
-    print("    n multiple assignment: %i" % n_multiple_assign)
+    logger.info("    n multiple assignment: %i" % n_multiple_assign)
 
-    print("Clamping trajectory...")
+    logger.info("Clamping trajectory...")
     gct = GenerateClampedTrajectory(wrap = False, pass_through_unassigned = True)
     clamped_traj = gct.run(st)
 
-    print("Computing new coordination numbers...")
+    logger.info("Computing new coordination numbers...")
     # Now get coordination numbers
     coords = calculate_coord_numbers(traj = clamped_traj,
                                      atoms = atoms,
@@ -319,14 +322,30 @@ def main(traj_path,
     nums, counts = np.unique(coords, return_counts = True)
     maxcount = np.max(counts)
     width = 50
-    print("Coordination histogram:")
-    for n, c in zip(nums, counts):
-        print(("  {:3d}: {:%is}    (x{:8d})" % width).format(n, "#" * int(width * c / maxcount), c))
 
-    print("Writing trajectory out...")
+    chist_out = []
+    for n, c in zip(nums, counts):
+        chist_out.append(("  {:3d}: {:%is}    (x{:8d})" % width).format(n, "#" * int(width * c / maxcount), c))
+    logger.info("Coordination histogram:\n%s" % "\n".join(chist_out))
+
+    #print("Flagging events...")
+    #flag_events(st, cutoff)
+
+    logger.info("Writing trajectory out...")
     write_lammpstraj(os.path.join(out_path, "clamped-vmd.out"), traj = clamped_traj, atoms = atoms, timesteps = timesteps, cellstr = cellstr)
     write_lammpstraj(os.path.join(out_path, "clamped.out"), traj = clamped_traj, atoms = atoms, coords = coords, timesteps = timesteps, cellstr = cellstr)
-    print("Done.")
+    logger.info("Done.")
+
+
+def flag_events(st, max_dist_to_aux):
+    sn = st.site_network
+    pbcc = PBCCalculator(sn.structure.cell)
+    site_distances = pbcc.pairwise_distances(sn.centers)
+    for frame_number, mob_that_jumped, from_sites, to_sites in st.jumps():
+        changed_layer = sn.layer[from_sites] != sn.layer[to_sites]
+        # Propagate layers: nearest auxiliary (by MIC) gets it's layer relative to
+        # the z-mobile atom; nearest next aux to that first aux (by MIC) gets its
+        # layer relative to that (as MIC), etc.
 
 
 if __name__ == "__main__":
