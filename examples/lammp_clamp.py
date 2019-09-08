@@ -328,6 +328,8 @@ def main(traj_path,
         chist_out.append(("  {:3d}: {:%is}    (x{:8d})" % width).format(n, "#" * int(width * c / maxcount), c))
     logger.info("Coordination histogram:\n%s" % "\n".join(chist_out))
 
+    np.save(os.path.join(out_path, "cn_clamped.out"), coords)
+
     #print("Flagging events...")
     #flag_events(st, cutoff)
 
