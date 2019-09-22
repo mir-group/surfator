@@ -2,9 +2,6 @@
 import numpy as np
 import math
 
-from MDAnalysis.lib.nsgrid import FastNS
-from MDAnalysis.lib.mdamath import triclinic_box
-
 from scipy.sparse.csgraph import connected_components
 
 from sitator.util import PBCCalculator
@@ -133,17 +130,13 @@ def agree_within_components_of_groups(groupfunc,
             for them to be considered part of the same deposit.
     """
 
-    pbcc, our_triclinic_cell, connmat, newtags, layer_mask = None, None, None, None, None
+    pbcc, dmat, connmat, newtags, layer_mask = None, None, None, None, None
     def func(atoms, **kwargs):
-        nonlocal pbcc, our_triclinic_cell, connmat, newtags, layer_mask
+        nonlocal pbcc, dmat, connmat, newtags, layer_mask
         # preallocate buffers
         if pbcc is None:
             pbcc = PBCCalculator(atoms.cell)
-            our_triclinic_cell = triclinic_box(
-                atoms.cell[0],
-                atoms.cell[1],
-                atoms.cell[2]
-            )
+            dmat = np.empty(shape = (len(atoms), len(atoms)))
             connmat = np.empty(shape = (len(atoms), len(atoms)), dtype = np.bool)
             newtags = np.empty(shape = len(atoms), dtype = np.int)
             layer_mask = np.empty(shape = len(atoms), dtype = np.bool)
@@ -153,18 +146,8 @@ def agree_within_components_of_groups(groupfunc,
         layers.sort()
         newtags.fill(-1)
 
-        ns = FastNS(
-            cutoff = cutoff,
-            coords = atoms.positions,
-            box = our_triclinic_cell,
-            pbc = True
-        )
-        nsres = ns.self_search()
-        connmat.fill(False)
-        neighbor_idexes = nsres.get_indices()
-        for i in range(len(neighbor_idexes)):
-            # Don't need symmetry cause use directed = False later
-            connmat[i, neighbor_idexes[i]] = True
+        pbcc.pairwise_distances(atoms.positions, out = dmat)
+        np.less_equal(dmat, cutoff, out = connmat)
 
         agreegrp_conns = []
         nexttag = 0

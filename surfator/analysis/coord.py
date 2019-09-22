@@ -1,9 +1,6 @@
 
 import numpy as np
 
-from MDAnalysis.lib.nsgrid import FastNS
-from MDAnalysis.lib.mdamath import triclinic_box
-
 from sitator.util.progress import tqdm
 from sitator.util import PBCCalculator
 
@@ -42,6 +39,8 @@ def calculate_coord_numbers(traj, atoms, cutoff):
 
 # This algorithm is linear time, but is broken until this bug is fixed in
 # MDAnalysis: https://github.com/MDAnalysis/mdanalysis/issues/2345
+# from MDAnalysis.lib.nsgrid import FastNS
+# from MDAnalysis.lib.mdamath import triclinic_box
 # def calculate_coord_numbers(traj, atoms, cutoff, skin = 0, mask = None):
 #     """Compute the coordination numbers for `mask` atoms at all times in `traj`.
 #

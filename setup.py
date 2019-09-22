@@ -13,7 +13,6 @@ setup(name = 'surfator',
         "scipy",
         "ase",
         "sklearn",
-        "sitator",
-        "MDAnalysis>=0.19.0"
+        "sitator"
       ],
       zip_safe = True)
