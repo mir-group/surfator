@@ -3,6 +3,7 @@ import numpy as np
 import os
 import sys
 from pathlib import Path
+import pickle
 
 import ase
 from ase.visualize import view
@@ -209,7 +210,7 @@ def main(traj_path,
          winner_bias = 0.5,
          assign_cutoff = None,
          agreegrp_cutoff = None,
-         skin = 0,
+         kmeans_for_heights = False,
          min_winner_percentage = 0.50001):
     """
     Args:
@@ -232,10 +233,10 @@ def main(traj_path,
     logger.info("Loading trajectory and reference structure...")
     traj, timesteps, atoms, cellstr = read_lammpstraj(traj_path)
 
-    surface_normal, ref_positions, layers, ref_site_types = read_refstruct(ref_path)
+    surface_normal, ref_positions, layer_labels, ref_site_types = read_refstruct(ref_path)
     ref_sn = ClosePackedReferenceSites(
         reference_positions = ref_positions,
-        layer_labels = layers,
+        layer_labels = layer_labels,
         layer_type_labels = ref_site_types,
         structure = atoms,
         static_mask = np.zeros(len(atoms), dtype = np.bool),
@@ -251,8 +252,17 @@ def main(traj_path,
 
     logger.info("Determining layers...")
     assert n is not None
-    heights_kmeans_stride = max(len(traj) // 300, 1)  # Why not? 300 frames of heights sounds reasonable
-    layers = get_layer_heights_kmeans(traj[::heights_kmeans_stride], atoms.cell, n, surface_normal = surface_normal)
+    if kmeans_for_heights:
+        heights_kmeans_stride = max(len(traj) // 300, 1)  # Why not? 300 frames of heights sounds reasonable
+        layers = get_layer_heights_kmeans(traj[::heights_kmeans_stride], atoms.cell, n, surface_normal = surface_normal)
+    else:
+        # We have the heights from the refstruct
+        assert set(layer_labels) == set(range(1, n + 1))
+        layers = np.zeros(shape = n)
+        heights = np.dot(ref_positions, surface_normal.T)
+        for i in range(n):
+            layers[i] = np.mean(heights[layer_labels == i + 1])
+
     logger.info("Layer heights: %s" % layers)
 
     logger.info("Assigning to reference sites...")
@@ -317,8 +327,7 @@ def main(traj_path,
     # Now get coordination numbers
     coords = calculate_coord_numbers(traj = clamped_traj,
                                      atoms = atoms,
-                                     cutoff = cutoff,
-                                     skin = skin)
+                                     cutoff = cutoff)
     nums, counts = np.unique(coords, return_counts = True)
     maxcount = np.max(counts)
     width = 50
@@ -328,12 +337,14 @@ def main(traj_path,
         chist_out.append(("  {:3d}: {:%is}    (x{:8d})" % width).format(n, "#" * int(width * c / maxcount), c))
     logger.info("Coordination histogram:\n%s" % "\n".join(chist_out))
 
-    np.save(os.path.join(out_path, "cn_clamped.out"), coords)
+    np.save(os.path.join(out_path, "cn_clamped.npy"), coords)
 
     #print("Flagging events...")
     #flag_events(st, cutoff)
 
     logger.info("Writing trajectory out...")
+    with open(os.path.join(out_path, "site_trajectory.pickle"), "wb") as f:
+        pickle.dump(st, f)
     write_lammpstraj(os.path.join(out_path, "clamped-vmd.out"), traj = clamped_traj, atoms = atoms, timesteps = timesteps, cellstr = cellstr)
     write_lammpstraj(os.path.join(out_path, "clamped.out"), traj = clamped_traj, atoms = atoms, coords = coords, timesteps = timesteps, cellstr = cellstr)
     logger.info("Done.")
