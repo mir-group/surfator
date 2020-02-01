@@ -6,6 +6,7 @@ from pathlib import Path
 import pickle
 
 import ase
+import ase.io
 from ase.visualize import view
 
 from surfator import StructureGroupAnalysis, STRUCTURE_GROUP_ATTRIBUTE
@@ -233,6 +234,10 @@ def main(traj_path,
     logger.info("Loading trajectory and reference structure...")
     traj, timesteps, atoms, cellstr = read_lammpstraj(traj_path)
 
+    logger.info("Writing out Python trajectory...")
+    ase.io.write(os.path.join(out_path, "atoms.cif"), atoms, parallel = False)
+    np.save(os.path.join(out_path, "orig_trj.npy"), traj)
+
     surface_normal, ref_positions, layer_labels, ref_site_types = read_refstruct(ref_path)
     ref_sn = ClosePackedReferenceSites(
         reference_positions = ref_positions,
@@ -343,10 +348,10 @@ def main(traj_path,
     #flag_events(st, cutoff)
 
     logger.info("Writing trajectory out...")
-    with open(os.path.join(out_path, "site_trajectory.pickle"), "wb") as f:
-        pickle.dump(st, f)
-    write_lammpstraj(os.path.join(out_path, "clamped-vmd.out"), traj = clamped_traj, atoms = atoms, timesteps = timesteps, cellstr = cellstr)
-    write_lammpstraj(os.path.join(out_path, "clamped.out"), traj = clamped_traj, atoms = atoms, coords = coords, timesteps = timesteps, cellstr = cellstr)
+    np.save(os.path.join(out_path, "site_traj.npy"), st.traj)
+    np.save(os.path.join(out_path, "clamped_trj.npy"), clamped_traj)
+    #write_lammpstraj(os.path.join(out_path, "clamped-vmd.out"), traj = clamped_traj, atoms = atoms, timesteps = timesteps, cellstr = cellstr)
+    write_lammpstraj(os.path.join(out_path, "clamped.lammpstrj"), traj = clamped_traj, atoms = atoms, coords = coords, timesteps = timesteps, cellstr = cellstr)
     logger.info("Done.")
 
 
