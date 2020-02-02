@@ -1,9 +1,9 @@
 from setuptools import setup, find_packages
 
 setup(name = 'surfator',
-      version = '0.0.1',
-      description = 'Site analysis for surfaces with `sitator`.',
-    #  download_url = "https://github.com/Linux-cpp-lisp/sitator",
+      version = '1.0.0',
+      description = '"Atomic democracy" for site analysis of surfaces and bulks with known lattice structure(s).',
+      download_url = "https://github.com/mir-group/surfator",
       author = 'Alby Musaelian',
       license = "MIT",
       python_requires = '>=3.2',
@@ -13,6 +13,6 @@ setup(name = 'surfator',
         "scipy",
         "ase",
         "sklearn",
-        "sitator"
+        "sitator>=2" # sitator 2.0.0 is the py3 version
       ],
       zip_safe = True)

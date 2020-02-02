@@ -2,9 +2,6 @@
 import numpy as np
 import math
 
-import ase
-from ase.neighborlist import NeighborList, NewPrimitiveNeighborList, get_connectivity_matrix
-
 from scipy.sparse.csgraph import connected_components
 
 from sitator.util import PBCCalculator
@@ -132,13 +129,14 @@ def agree_within_components_of_groups(groupfunc,
         cutoff (float, distance units): The maximum distance between two adatoms
             for them to be considered part of the same deposit.
     """
-    pbcc, pairwise_dmat, connmat, newtags, layer_mask = None, None, None, None, None
+
+    pbcc, dmat, connmat, newtags, layer_mask = None, None, None, None, None
     def func(atoms, **kwargs):
-        nonlocal pbcc, pairwise_dmat, connmat, newtags, layer_mask
+        nonlocal pbcc, dmat, connmat, newtags, layer_mask
         # preallocate buffers
         if pbcc is None:
             pbcc = PBCCalculator(atoms.cell)
-            pairwise_dmat = np.empty(shape = (len(atoms), len(atoms)), dtype = atoms.positions.dtype)
+            dmat = np.empty(shape = (len(atoms), len(atoms)))
             connmat = np.empty(shape = (len(atoms), len(atoms)), dtype = np.bool)
             newtags = np.empty(shape = len(atoms), dtype = np.int)
             layer_mask = np.empty(shape = len(atoms), dtype = np.bool)
@@ -148,8 +146,8 @@ def agree_within_components_of_groups(groupfunc,
         layers.sort()
         newtags.fill(-1)
 
-        pbcc.pairwise_distances(atoms.positions, out = pairwise_dmat)
-        np.less_equal(pairwise_dmat, cutoff, out = connmat)
+        pbcc.pairwise_distances(atoms.positions, out = dmat)
+        np.less_equal(dmat, cutoff, out = connmat)
 
         agreegrp_conns = []
         nexttag = 0
