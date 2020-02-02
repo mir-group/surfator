@@ -355,15 +355,15 @@ def main(traj_path,
     logger.info("Done.")
 
 
-def flag_events(st, max_dist_to_aux):
-    sn = st.site_network
-    pbcc = PBCCalculator(sn.structure.cell)
-    site_distances = pbcc.pairwise_distances(sn.centers)
-    for frame_number, mob_that_jumped, from_sites, to_sites in st.jumps():
-        changed_layer = sn.layer[from_sites] != sn.layer[to_sites]
-        # Propagate layers: nearest auxiliary (by MIC) gets it's layer relative to
-        # the z-mobile atom; nearest next aux to that first aux (by MIC) gets its
-        # layer relative to that (as MIC), etc.
+# def flag_events(st, max_dist_to_aux):
+#     sn = st.site_network
+#     pbcc = PBCCalculator(sn.structure.cell)
+#     site_distances = pbcc.pairwise_distances(sn.centers)
+#     for frame_number, mob_that_jumped, from_sites, to_sites in st.jumps():
+#         changed_layer = sn.layer[from_sites] != sn.layer[to_sites]
+#         # Propagate layers: nearest auxiliary (by MIC) gets it's layer relative to
+#         # the z-mobile atom; nearest next aux to that first aux (by MIC) gets its
+#         # layer relative to that (as MIC), etc.
 
 
 if __name__ == "__main__":
