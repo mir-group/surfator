@@ -20,8 +20,12 @@ $ pip install .
 
 ## Algorithm and Usage
 
-See our preprint (link TODO) for a full description of the atomic democracy
-algorithm.
+Please see our preprint for a full description of the atomic democracy
+algorithm (Methods -> Clamping):
+
+> **Evolution of Metastable Structures in Bimetallic Catalysts from Microscopy and Machine-Learning Molecular Dynamics**
+> Jin Soo Lim, Jonathan Vandermause, Matthijs A. van Spronsen, Albert Musaelian, Christopher R. O’Connor, Tobias Egle, Yu Xie, Lixin Sun, Nicola Molinari, Jacob Florian, Kaining Duanmu, Robert J. Madix, Philippe Sautet, Cynthia M. Friend, Boris Kozinsky
+> https://doi.org/10.26434/chemrxiv.11811660.v1
 
 Documentation of parameters can be found in docstrings in the source.
 
